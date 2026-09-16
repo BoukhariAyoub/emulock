@@ -1,0 +1,297 @@
+# emulock
+
+**Stop parallel coding agents from fighting over the same Android emulator.**
+
+## The problem
+
+You run three or four coding agents at once, because that is the whole point of agents.
+They all share one machine, they all run `adb devices`, and they all see the same list.
+Nothing tells any of them that a device is spoken for.
+
+So this happens:
+
+- **Agent A installs its APK onto the emulator Agent B is testing on.** B's next
+  assertion fails against a build it never made. B concludes its code is broken, and
+  spends the next twenty minutes proving something that was never true.
+- **Agent C runs `adb kill-server`** to clear up a connection glitch. It drops *every*
+  session's devices at once. Three unrelated tasks fail simultaneously.
+- **Agent D reboots a device** mid-suite. The run dies at flow 7 of 12 with an error
+  that looks exactly like a flaky test.
+- **A device crashes, and an agent re-runs a remembered `emulator -port 5554`.** That
+  port now hosts a completely different AVD. Everything passes — against the wrong API
+  level.
+- **An agent finishes and never releases.** Hours later a lock is still held by a
+  session that ended long ago, and the pool is full of devices nobody is using.
+
+Every one of these is invisible in the logs. You do not see a collision; you see a
+flaky test, a broken build, a wasted afternoon. And the more agents you run, the worse
+it gets — which punishes exactly the thing you were trying to do.
+
+## The fix
+
+Every device is reserved before use, and **the reservation is enforced by the harness,
+not by the agent's good manners**:
+
+```
+$ emulock claim
+emulator-5556  (AVD: medium_phone)  claimed by claude-code:15db96f9
+
+$ adb -s emulator-5560 shell input tap 100 200
+Blocked: emulator-5560 belongs to another agent (branch: fix/checkout-flake).
+Never touch a device you didn't claim. Claim your own with: emulock claim
+```
+
+That is not a warning the agent can read and ignore. The command never runs.
+
+## How it works
+
+```
+         Agent A                                    Agent B
+            │                                          │
+            │ emulock claim                            │
+            ▼                                          │
+    ┌────────────────────┐                             │
+    │     lock store     │  one directory per device,  │
+    │  ~/.emulator-locks │  mkdir is the atomic claim  │
+    │                    │  — no daemon, no database   │
+    │  emulator-5556 ────┼──▶ owner: Agent A           │
+    └────────────────────┘    branch: fix/checkout     │
+            │                                          │
+            │ "emulator-5556 is yours"                 │
+            ▼                                          ▼
+   adb -s 5556 install app.apk               adb -s 5556 shell input tap
+            │                                          │
+            └──────────────────┐        ┌──────────────┘
+                               ▼        ▼
+            ╔═══════════════════════════════════════════╗
+            ║   PreToolUse hook — runs BEFORE the        ║
+            ║   command, inside the agent harness        ║
+            ║                                           ║
+            ║   who owns emulator-5556?                 ║
+            ╚═════════════╦═══════════════╦═════════════╝
+                          ║               ║
+             caller owns it               caller does not
+                          ║               ║
+                          ▼               ▼
+              ┌───────────────────┐   ┌──────────────────────┐
+              │ command executes  │   │ REFUSED              │
+              │                   │   │                      │
+              │ lease refreshed   │   │ never reaches adb    │
+              │ "Installing" and  │   │ message names the    │
+              │ its target logged │   │ owner and the branch │
+              └─────────┬─────────┘   └──────────────────────┘
+                        │
+                        ▼
+                  ┌────────────┐
+                  │ emulock-lab│ read-only dashboard: who holds what,
+                  │   :7337    │ lease remaining, what each is doing
+                  └────────────┘
+```
+
+The hook is the whole trick. It sits in the agent harness — not in a wrapper script the
+agent could sidestep, not in a linter it could ignore — so a device-stomping command is
+stopped before it ever reaches `adb`.
+
+The failures above stop being possible:
+
+| Failure | What stops it |
+|---|---|
+| Installing onto someone else's device | the command is refused before it executes |
+| `adb kill-server` | always refused, for everyone |
+| Bare `adb shell` picking a device at random | refused; you must name your own serial |
+| Booting the wrong AVD on a recycled port | a launch must use the port *and* AVD you reserved |
+| Locks outliving the session | leases expire after 4h idle and are reclaimable |
+| Not knowing who holds what | `emulock status`, or a live dashboard |
+
+## A lock an agent can't route around
+
+Reservation schemes usually ask for cooperation: the agent is supposed to check first.
+Agents shell out constantly, and a device-stomping command looks completely reasonable
+in isolation — so eventually one skips the check and the reservation means nothing.
+
+emulock installs a `PreToolUse` hook. The harness refuses the command before it
+executes. The lock stops being a convention and becomes a boundary.
+
+Two halves make that work:
+
+- **The hook** refuses what it should refuse, with a message that names the owner and
+  the branch, so the agent knows what happened instead of guessing.
+- **The skill** teaches the protocol up front, so agents claim correctly and rarely hit
+  the hook at all. Enforcement is the floor, not the interface.
+
+Android only, deliberately. Android emulators are heavyweight VMs bound to a port —
+you run a handful before the machine gives out, and two sessions booting the same AVD
+corrupt the image. That scarcity is what makes locking worth enforcing.
+
+**No dependencies.** Bash, python3, and the platform-tools you already have.
+
+## Install
+
+Requires bash, python3, and the Android SDK platform-tools. macOS and Linux.
+
+```bash
+git clone https://github.com/BoukhariAyoub/emulock.git
+cd emulock
+./install.sh
+```
+
+`install.sh` symlinks `emulock` and `emulock-lab` into `~/.local/bin` and prints the
+hook block to paste into your agent's settings. It changes nothing else, and prints
+every action before taking it.
+
+Then wire the guard into Claude Code by adding this to `.claude/settings.json` in each
+repo where you want it enforced — committing it means every contributor gets it with no
+install step of their own:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "~/.local/share/emulock/hooks/claude-code/emulock-guard.sh" }]
+      }
+    ]
+  }
+}
+```
+
+Verify:
+
+```bash
+emulock doctor          # is enforcement actually wired up?
+./tests/run.sh          # 56 tests, no dependencies
+```
+
+`doctor` is read-only. It checks dependencies, the lock store, your session identity,
+and whether the hook is wired into a `settings.json` above the current directory —
+printing the exact block to paste if it is not.
+
+**Neither `install.sh` nor the skill will wire the hook for you, by design.** A
+`PreToolUse` hook decides which commands an agent may run; a hook an agent can install
+is a hook an agent can uninstall, and self-installing enforcement is not enforcement.
+Agent harnesses already refuse to edit hook files as self-modification — correctly. So
+the human wires it once, and `doctor` exists so an agent can *check and report* instead
+of guessing or trying to repair it.
+
+### Install the skill
+
+emulock is used by agents, not by hand, so teach them the protocol. Copy the skill into
+the repo where they work:
+
+```bash
+cp -r skills/emulock .claude/skills/
+```
+
+Without it the hook still protects you, but agents learn the rules by being refused —
+they hit a wall, guess, and retry. With it they claim correctly the first time. If your
+harness has no skill mechanism, paste the contents of
+[`skills/emulock/SKILL.md`](skills/emulock/SKILL.md) into your agent instructions file
+instead.
+
+## Use
+
+```bash
+emulock claim                      # reserve a free device
+emulock claim --avd medium_phone   # reserve a specific AVD
+emulock claim --note "checkout flake repro"
+emulock status                     # who owns what
+emulock reclaim                    # device died — same AVD, new serial
+emulock release emulator-5556      # done (leave it running — warm pool)
+emulock reap                       # clear provably dead locks
+```
+
+Always target your own serial explicitly — `adb -s <your-serial> …`, never bare
+`adb shell`. Every allowed device command refreshes your lease.
+
+### Identity is the AVD, not the port
+
+`emulator-5554` is the serial that bound port 5554 *this boot*. Next boot it may be a
+different AVD entirely. After a crash use `emulock reclaim`, never a remembered
+`-port 5554` command — that port may now be something else.
+
+## emulock-lab
+
+```bash
+emulock-lab
+```
+
+A read-only dashboard on `127.0.0.1:7337`. It enumerates the lock store, asks adb what
+is actually attached, and lists installed AVDs. It never claims, releases, boots or
+targets a device, so it is safe to leave open beside any number of live agent sessions.
+
+Each device resolves to one state, and **live observation always beats stored metadata**:
+
+| State | Meaning |
+|---|---|
+| `unclaimed` | running, owned by nobody — anyone's next command can take it |
+| `ghost` | the device died but the lock outlived it |
+| `expired` | lease ran out; reclaimable right now |
+| `yours` | this session owns it |
+| `booting` | claimed, not yet attached (`stalled` past 3 minutes) |
+| `held` | another session, healthy |
+
+It also shows **what each session is doing** — `Running flow · checkout.yaml`,
+`Installing`, `Driving UI` — classified from the command the guard already intercepts.
+
+## What gets stored
+
+One directory per device under `~/.emulator-locks`, plus one per AVD so two claims can
+never boot the same image. `mkdir` is the atomic claim; there is no daemon and no
+database.
+
+Activity is recorded as a fixed verb plus one narrowly-extracted target
+(`Running flow`, `live-show/checkout.yaml`). **The command itself is never written to
+disk** — the lock store is world-readable on a shared machine, and command lines carry
+paths, hostnames and arguments that have no business sitting in it.
+
+Nothing here reads your repo's layout, your tracker's id format, or any particular
+agent's files. Branch comes from git; the verb comes from the command; the note is
+whatever you passed to `claim --note`. A project with none of those conventions still
+gets a useful dashboard.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EMULATOR_LOCK_DIR` | `~/.emulator-locks` | lock store location |
+| `EMULATOR_LOCK_IDLE_TTL` | `14400` (4h) | lease length before a lock is reclaimable |
+| `EMULATOR_LOCK_OWNER` | unset | override session identity (for other harnesses) |
+| `EMULATOR_LOCK_TICKET_RE` | unset | regex whose first group is a ticket id in the branch name; unset shows no ticket |
+| `ANDROID_HOME` / `ANDROID_SDK_ROOT` | probed | SDK root |
+
+## Harness support
+
+**Claude Code** is enforced — it exposes a stable per-session id in the shell
+environment, so the guard and the CLI always agree on who "this session" is.
+
+Anything else (a bare terminal, another agent runner) falls back to
+`manual:$USER` and is **advisory only**: the locks still coordinate, but nothing
+blocks a command. Set `EMULATOR_LOCK_OWNER` to give an external driver a stable
+identity.
+
+The guard inspects only the top-level command string. A wrapper script that shells out
+to adb internally is not policed and is expected to claim for itself. Quoted strings and
+heredocs are stripped before matching, so a commit message mentioning `adb` does not trip
+enforcement — which also means `bash -c "adb …"` escapes inspection. **This is
+anti-accident, not anti-adversarial.**
+
+## Tests
+
+```bash
+./tests/run.sh          # all
+./tests/run.sh guard    # one group: shells | guard | state | lock
+```
+
+56 tests, no dependencies, run against a scratch lock store — safe to run while agents
+hold live devices.
+
+The guard is a `PreToolUse` hook on *every* shell command, so a syntax error in it does
+not merely break adb: it blocks all shell access for every session on the machine, and
+agents cannot repair it because editing hooks counts as self-modification. The suite
+therefore parses it under the oldest bash it must run on (macOS ships 3.2) as well as
+your current one. **Run the tests before you edit the hook.**
+
+## License
+
+MIT

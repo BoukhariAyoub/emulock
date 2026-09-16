@@ -1,0 +1,632 @@
+#!/usr/bin/env bash
+#
+# emulock — machine-wide emulator reservations for parallel agents.
+#
+# Lock store: ~/.emulator-locks/ (shared by every agent/worktree on this machine)
+#   emulator-<port>/meta       one dir per device; mkdir is the atomic claim
+#   emulator-<port>/last_used  lease heartbeat (refreshed by the guard hook)
+#   avd-<name>/meta            one dir per AVD; two claims can never boot the same AVD
+#
+# Identity — two harnesses, resolved in this priority order by owner_id():
+#   1. EMULATOR_LOCK_OWNER    explicit override, honoured first if set. Kept for
+#                             external drivers (and historically for Cursor, whose
+#                             shell had no conversation-id visibility and needed a
+#                             hook to inject one per command). Normally unset.
+#   2. CLAUDE_CODE_SESSION_ID Claude Code CLI already exposes a stable per-session
+#                             id directly in the shell environment — no injection
+#                             hook needed. Recorded as "claude-code:<id>".
+#   3. manual:$(id -un)       last resort for a bare human shell (no agent
+#                             harness at all). Distinct from the above, so it can
+#                             no longer collide with a real session — it used to be
+#                             the silent fallback for Claude Code sessions too,
+#                             which meant two concurrent sessions run by the same
+#                             OS user were indistinguishable to this lock store
+#                             (fixed 2026-08-26, see git blame).
+#
+# Enforcement — a guard hook that shares this lock store:
+#   Claude Code: project-level PreToolUse hook, the guard hook
+#                (wired via the git-committed your settings.json — no install
+#                step; every contributor gets it just by having the repo)
+# It hard-blocks adb/emulator commands that target serials the caller's session
+# doesn't own, and refreshes the lease on every allowed command. The lock is not
+# advisory under either harness — but IS advisory (no hard-block, only the
+# collision-resistant identity above) for anything else, e.g. a bare terminal.
+#
+# Usage:
+#   emulock claim [--avd NAME] [--require-booted] [--additional] [--note TEXT]
+#   emulock reclaim [--note TEXT]
+#   emulock release <serial> [--kill] [--force]
+#   emulock heartbeat <serial>
+#   emulock status
+#   emulock reap
+#
+# Multi-device claims: plain `claim` is one-device-per-owner by default (the
+# "already held" short-circuit below) -- a convenience default, not a security
+# boundary. The real boundary is per-serial OWNER_ID, enforced by the guard
+# hook; release/heartbeat already take an explicit serial and have no notion
+# of "your one device". Pass `--additional` to claim a second (or Nth) device
+# under this same identity -- e.g. a two-device manual QA run. It skips the
+# short-circuit and reserves a free port/AVD exactly like a first-time claim.
+# Release each serial explicitly when done; `reclaim` only ever tracks your
+# newest lock, so use `release <serial>` for the others.
+#
+# Identity is the AVD name, not the port. Serial (emulator-5554) is assigned at
+# boot and will change. After a crash, run `reclaim` (or `claim --avd NAME`) —
+# never re-run an old `-port 5554` command; that port may boot a different AVD.
+#
+# Staleness (auto-reclaimed by claim/reap) is lease-based, not a blind TTL:
+#   - device absent from `adb devices` and no activity for 10 min (boot grace)
+#   - no activity for EMULATOR_LOCK_IDLE_TTL seconds (default 14400 = 4 h),
+#     even if the device is still running
+# "Activity" = last_used mtime, refreshed by the guard hook whenever the owning
+# conversation touches the device. An agent actively using its emulator can
+# never be reaped.
+#
+# Environment:
+#   EMULATOR_LOCK_OWNER     owner identity override (Cursor hook-injected; see
+#                           owner_id() for the full Cursor > Claude Code > manual
+#                           fallback chain)
+#   EMULATOR_LOCK_DIR       lock store         (default: ~/.emulator-locks)
+#   EMULATOR_LOCK_IDLE_TTL  idle lease seconds (default: 14400)
+#   ANDROID_HOME            SDK root           (default: ~/Library/Android/sdk)
+#
+# Options (global): --dry-run --help
+
+set -euo pipefail
+
+LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
+IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
+BOOT_GRACE=600
+sdk_root() {
+  local c
+  for c in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" \
+           "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    [[ -n "$c" && -d "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  printf '%s' "$HOME/Library/Android/sdk"
+}
+SDK="$(ANDROID_HOME="${ANDROID_HOME:-}" ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-}" sdk_root)"
+EMU_BIN="$SDK/emulator/emulator"
+DRY_RUN=0
+
+die() { echo "emulator-lock: $*" >&2; exit 1; }
+usage() { sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'; }
+
+command -v adb >/dev/null 2>&1 || die "adb not on PATH"
+
+now() { date +%s; }
+
+owner_id() {
+  if [[ -n "${EMULATOR_LOCK_OWNER:-}" ]]; then
+    echo "$EMULATOR_LOCK_OWNER"                        # Cursor hook injection
+  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    echo "claude-code:$CLAUDE_CODE_SESSION_ID"          # Claude Code CLI, native env var
+  else
+    echo "manual:$(id -un)"                             # bare shell, no agent harness
+  fi
+}
+owner_worktree() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+owner_branch() { git branch --show-current 2>/dev/null || echo "?"; }
+
+# Serials adb knows about, any state (device/offline/unauthorized).
+adb_all_serials() {
+  adb devices 2>/dev/null | awk 'NR>1 && $1 ~ /^emulator-/ {print $1}'
+}
+
+# Serials fully online.
+adb_booted_serials() {
+  adb devices 2>/dev/null | awk 'NR>1 && $2=="device" && $1 ~ /^emulator-/ {print $1}'
+}
+
+meta_get() { # meta_get <lockname> <KEY>   (lockname: emulator-5554 or avd-Name)
+  local f="$LOCK_ROOT/$1/meta"
+  [[ -f "$f" ]] && sed -n "s/^$2=//p" "$f" || true
+}
+
+# BSD stat (macOS) and GNU stat (Linux) spell this differently and neither
+# accepts the other's flag, so try both rather than branching on uname.
+file_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""; }
+
+# Seconds since last activity (last_used mtime, else CREATED_AT), or empty.
+lease_age() { # lease_age <serial>
+  local d="$LOCK_ROOT/$1" ts=""
+  [[ -f "$d/last_used" ]] && ts="$(file_mtime "$d/last_used")"
+  [[ -z "$ts" ]] && ts="$(meta_get "$1" CREATED_AT)"
+  [[ -n "$ts" ]] && echo $(( $(now) - ts )) || echo ""
+}
+
+# This owner's lock (newest if somehow more than one). Empty if none.
+find_our_lock() {
+  local d serial best="" best_ts=0 ts me
+  [[ -d "$LOCK_ROOT" ]] || return 0
+  me="$(owner_id)"
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] || continue
+    serial="$(basename "$d")"
+    [[ "$(meta_get "$serial" OWNER_ID)" == "$me" ]] || continue
+    ts="$(meta_get "$serial" CREATED_AT)"
+    ts="${ts:-0}"
+    if (( ts >= best_ts )); then
+      best="$serial"
+      best_ts="$ts"
+    fi
+  done
+  echo "$best"
+}
+
+avd_of_serial() { # AVD name of a running emulator (best effort)
+  adb -s "$1" emu avd name 2>/dev/null | head -n1 | tr -d '\r' || true
+}
+
+is_stale() { # is_stale <serial> — 0 = stale
+  local serial="$1" age
+  age="$(lease_age "$serial")"
+  [[ -z "$age" ]] && return 0                     # no/broken meta → stale
+  (( age > IDLE_TTL )) && return 0                # idle too long, even if booted
+  if ! adb_all_serials | grep -qx "$serial"; then
+    (( age > BOOT_GRACE )) && return 0            # never booted / died
+  fi
+  return 1
+}
+
+avd_lock_dir() { echo "$LOCK_ROOT/avd-$1"; }
+
+try_avd_lock() { # try_avd_lock <avd> <serial> — 0 = we got it
+  local avd="$1" serial="$2"
+  mkdir "$(avd_lock_dir "$avd")" 2>/dev/null || return 1
+  cat > "$(avd_lock_dir "$avd")/meta" <<EOF
+AVD=$avd
+SERIAL=$serial
+OWNER_ID=$(owner_id)
+CREATED_AT=$(now)
+EOF
+}
+
+release_avd_lock_of() { # release_avd_lock_of <serial>
+  local avd
+  avd="$(meta_get "$1" AVD)"
+  [[ -n "$avd" && "$avd" != "unknown" ]] && rm -rf "$(avd_lock_dir "$avd")"
+  return 0
+}
+
+drop_lock() { # drop_lock <serial> — serial lock + its AVD lock
+  release_avd_lock_of "$1"
+  rm -rf "$LOCK_ROOT/$1"
+}
+
+reap_stale() { # reap_stale [verbose]
+  local verbose="${1:-}" d serial avd paired
+  [[ -d "$LOCK_ROOT" ]] || return 0
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] || continue
+    serial="$(basename "$d")"
+    if is_stale "$serial"; then
+      if [[ "$DRY_RUN" == 1 ]]; then
+        [[ -n "$verbose" ]] && echo "[dry-run] would reap stale lock: $serial"
+      else
+        local owner
+        owner="$(meta_get "$serial" OWNER_BRANCH)"
+        drop_lock "$serial"
+        [[ -n "$verbose" ]] && echo "reaped stale lock: $serial (owner: ${owner:-?})"
+      fi
+    fi
+  done
+  # Orphan AVD locks: their serial lock is gone.
+  for d in "$LOCK_ROOT"/avd-*; do
+    [[ -d "$d" ]] || continue
+    avd="$(basename "$d")"
+    paired="$(meta_get "$avd" SERIAL)"
+    if [[ -z "$paired" || ! -d "$LOCK_ROOT/$paired" ]]; then
+      if [[ "$DRY_RUN" == 1 ]]; then
+        [[ -n "$verbose" ]] && echo "[dry-run] would reap orphan AVD lock: $avd"
+      else
+        rm -rf "$d"
+        [[ -n "$verbose" ]] && echo "reaped orphan AVD lock: $avd"
+      fi
+    fi
+  done
+  return 0
+}
+
+write_meta() { # write_meta <serial> <avd> <port> <state> <note>
+  cat > "$LOCK_ROOT/$1/meta" <<EOF
+SERIAL=$1
+AVD=$2
+PORT=$3
+STATE=$4
+OWNER_ID=$(owner_id)
+OWNER_WORKTREE=$(owner_worktree)
+OWNER_BRANCH=$(owner_branch)
+NOTE=$5
+CREATED_AT=$(now)
+EOF
+  touch "$LOCK_ROOT/$1/last_used"
+}
+
+try_lock() { # atomic; 0 = we got it
+  mkdir "$LOCK_ROOT/$1" 2>/dev/null
+}
+
+avd_api_level() { # digits from image.sysdir.1=system-images/android-NN...
+  local ini="$HOME/.android/avd/$1.avd/config.ini"
+  [[ -f "$ini" ]] || { echo ""; return; }
+  sed -n 's|^image\.sysdir\.1 *= *system-images/android-\([0-9]*\).*|\1|p' "$ini" | head -n1
+}
+
+boot_command() { # boot_command <avd> <port>
+  local avd="$1" port="$2" api flags="-port $port -no-boot-anim"
+  api="$(avd_api_level "$avd")"
+  # Unknown API → assume flags needed (boot rule: "when in doubt, add them").
+  if [[ -z "$api" || "$api" -ge 36 ]]; then
+    flags="$flags -gpu host -feature -GuestAngle"
+  fi
+  echo "$EMU_BIN @$avd $flags"
+}
+
+avds_in_use() { # AVDs held by locks or running emulators
+  local d serial
+  for d in "$LOCK_ROOT"/avd-*; do
+    [[ -d "$d" ]] && basename "$d" | sed 's/^avd-//'
+  done
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] && meta_get "$(basename "$d")" AVD
+  done
+  for serial in $(adb_booted_serials); do
+    avd_of_serial "$serial"
+  done
+}
+
+print_boot_hint() { # print_boot_hint <serial> <avd>
+  echo "identity is AVD $2 — do not relaunch by port; next boot may be a different serial"
+  echo "relaunch after crash: $0 reclaim"
+  echo "use it as: adb -s $1 ..."
+}
+
+cmd_claim() {
+  local want_avd="" require_booted=0 note="" serial avd port used_avds candidate
+  local our_serial our_avd released_avd="" additional=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --avd) want_avd="$2"; shift 2 ;;
+    --require-booted) require_booted=1; shift ;;
+    --additional) additional=1; shift ;;
+    --note) note="$2"; shift 2 ;;
+    *) die "claim: unknown option $1" ;;
+    esac
+  done
+
+  mkdir -p "$LOCK_ROOT"
+
+  # AVD name is identity. If this owner already reserved one, keep it —
+  # even when the qemu process died and the old serial/port is gone.
+  # --additional opts out: reserve a genuinely new device instead (multi-device
+  # manual QA). Skips straight to reap_stale + sections 1/2 below, unchanged.
+  our_serial=""
+  (( additional )) || our_serial="$(find_our_lock)"
+  if [[ -n "$our_serial" ]]; then
+    our_avd="$(meta_get "$our_serial" AVD)"
+    if adb_booted_serials | grep -qx "$our_serial"; then
+      touch "$LOCK_ROOT/$our_serial/last_used"
+      echo "claimed: $our_serial (already held, avd: ${our_avd:-?})"
+      print_boot_hint "$our_serial" "${our_avd:-?}"
+      return 0
+    fi
+    if adb_all_serials | grep -qx "$our_serial"; then
+      touch "$LOCK_ROOT/$our_serial/last_used"
+      echo "claimed: $our_serial (already held, avd: ${our_avd:-?}, device offline — wait for boot)"
+      echo "use it as: adb -s $our_serial wait-for-device"
+      return 0
+    fi
+    if [[ -z "$want_avd" && -n "$our_avd" && "$our_avd" != "unknown" ]]; then
+      want_avd="$our_avd"
+    fi
+    released_avd="$our_avd"
+    echo "emulator-lock: $our_serial is gone; reclaiming AVD ${want_avd:-?} (port may change)" >&2
+    if [[ "$DRY_RUN" == 1 ]]; then
+      echo "[dry-run] would drop dead lock $our_serial and boot AVD ${want_avd:-?}"
+    else
+      drop_lock "$our_serial"
+    fi
+  fi
+
+  reap_stale
+
+  # 1) Reuse a booted, unclaimed emulator (enforcement makes "unclaimed" mean
+  #    genuinely free — hooked agents cannot use a device without a lock).
+  for serial in $(adb_booted_serials); do
+    [[ -d "$LOCK_ROOT/$serial" ]] && continue
+    avd="$(avd_of_serial "$serial")"
+    [[ -n "$want_avd" && "$avd" != "$want_avd" ]] && continue
+    # AVD reserved by someone else (e.g. mid-boot on another port) → not free.
+    [[ -n "$avd" && -d "$(avd_lock_dir "$avd")" ]] && continue
+    if [[ "$DRY_RUN" == 1 ]]; then
+      echo "[dry-run] would claim: $serial (reuse running emulator, avd: ${avd:-?})"
+      return 0
+    fi
+    if try_lock "$serial"; then
+      if [[ -n "$avd" ]] && ! try_avd_lock "$avd" "$serial"; then
+        rm -rf "$LOCK_ROOT/$serial"   # lost the AVD race — try the next device
+        continue
+      fi
+      write_meta "$serial" "${avd:-unknown}" "${serial#emulator-}" "running" "$note"
+      echo "claimed: $serial (reused running emulator, avd: ${avd:-?})"
+      print_boot_hint "$serial" "${avd:-?}"
+      return 0
+    fi
+  done
+
+  (( require_booted )) && die "claim: no free booted emulator (--require-booted)"
+
+  # 2) Reserve a free port + free AVD, hand back the boot command.
+  local all_serials
+  all_serials="$(adb_all_serials)"
+  port=""
+  for candidate in $(seq 5554 2 5584); do
+    echo "$all_serials" | grep -qx "emulator-$candidate" && continue
+    [[ -d "$LOCK_ROOT/emulator-$candidate" ]] && continue
+    if [[ "$DRY_RUN" == 1 ]]; then port="$candidate"; break; fi
+    if try_lock "emulator-$candidate"; then port="$candidate"; break; fi
+  done
+  [[ -z "$port" ]] && die "claim: no free emulator port (5554-5584) — release something or reap"
+  serial="emulator-$port"
+
+  used_avds="$(avds_in_use)"
+  # Dead lock for this owner was dropped (or would be); that AVD is ours again.
+  if [[ -n "$released_avd" && "$released_avd" != "unknown" ]]; then
+    used_avds="$(printf '%s\n' $used_avds | grep -vx "$released_avd" || true)"
+  fi
+  avd=""
+  if [[ -n "$want_avd" ]]; then
+    if ! "$EMU_BIN" -list-avds 2>/dev/null | grep -qx "$want_avd"; then
+      [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
+      die "claim: no such AVD '$want_avd'"
+    fi
+    if echo "$used_avds" | grep -qx "$want_avd"; then
+      [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
+      die "claim: AVD '$want_avd' is in use by another lock or running emulator"
+    fi
+    if [[ "$DRY_RUN" != 1 ]] && ! try_avd_lock "$want_avd" "$serial"; then
+      rm -rf "$LOCK_ROOT/$serial"
+      die "claim: AVD '$want_avd' was locked by another agent just now — retry"
+    fi
+    avd="$want_avd"
+  else
+    for candidate in $("$EMU_BIN" -list-avds 2>/dev/null); do
+      echo "$used_avds" | grep -qx "$candidate" && continue
+      if [[ "$DRY_RUN" == 1 ]]; then avd="$candidate"; break; fi
+      # mkdir on the AVD lock is the atomic tie-break between concurrent claims.
+      if try_avd_lock "$candidate" "$serial"; then avd="$candidate"; break; fi
+    done
+  fi
+  if [[ -z "$avd" ]]; then
+    [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
+    die "claim: no free AVD — all in use (create another AVD clone or release one)"
+  fi
+
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "[dry-run] would claim: $serial (boot needed, avd: $avd)"
+    echo "[dry-run] boot command: $(boot_command "$avd" "$port")"
+    echo "[dry-run] identity is AVD $avd — relaunch with: $0 reclaim"
+    return 0
+  fi
+
+  write_meta "$serial" "$avd" "$port" "booting" "$note"
+  echo "claimed: $serial (boot needed, avd: $avd)"
+  echo "boot command (run as long-lived background shell, block_until_ms=0; add -no-snapshot-load for cold boot):"
+  echo "  $(boot_command "$avd" "$port")"
+  echo "then wait for boot:"
+  echo "  adb -s $serial wait-for-device"
+  print_boot_hint "$serial" "$avd"
+}
+
+cmd_reclaim() {
+  local note=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --note) note="$2"; shift 2 ;;
+    *) die "reclaim: unknown option $1" ;;
+    esac
+  done
+  mkdir -p "$LOCK_ROOT"
+  local our_serial avd
+  our_serial="$(find_our_lock)"
+  [[ -n "$our_serial" ]] || die "reclaim: this conversation has no prior claim. Use: claim [--avd NAME]"
+  avd="$(meta_get "$our_serial" AVD)"
+  [[ -n "$avd" && "$avd" != "unknown" ]] || die "reclaim: lock $our_serial has no AVD name — pass claim --avd NAME"
+  echo "reclaiming AVD $avd (previous serial $our_serial; port may change)"
+  if [[ -n "$note" ]]; then
+    cmd_claim --avd "$avd" --note "$note"
+  else
+    cmd_claim --avd "$avd"
+  fi
+}
+
+cmd_release() {
+  local serial="" kill=0 force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --kill) kill=1; shift ;;
+    --force) force=1; shift ;;
+    -*) die "release: unknown option $1" ;;
+    *) serial="$1"; shift ;;
+    esac
+  done
+  [[ -n "$serial" ]] || die "release: serial required (e.g. emulator-5554)"
+  [[ -d "$LOCK_ROOT/$serial" ]] || { echo "release: no lock for $serial (nothing to do)"; return 0; }
+
+  local lock_owner
+  lock_owner="$(meta_get "$serial" OWNER_ID)"
+  if [[ -n "$lock_owner" && "$lock_owner" != "$(owner_id)" && "$force" != 1 ]]; then
+    die "release: $serial is owned by another agent ($lock_owner, branch: $(meta_get "$serial" OWNER_BRANCH)). Use --force only if you are sure."
+  fi
+
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "[dry-run] would release $serial$( ((kill)) && echo ' and kill the emulator')"
+    return 0
+  fi
+  if (( kill )); then
+    adb -s "$serial" emu kill >/dev/null 2>&1 || true
+    echo "killed emulator $serial"
+  fi
+  drop_lock "$serial"
+  echo "released: $serial"
+}
+
+cmd_heartbeat() { # refresh the lease (for wrapper scripts holding a device)
+  local serial="${1:-}"
+  [[ -n "$serial" ]] || die "heartbeat: serial required"
+  [[ -d "$LOCK_ROOT/$serial" ]] || die "heartbeat: no lock for $serial"
+  local lock_owner
+  lock_owner="$(meta_get "$serial" OWNER_ID)"
+  [[ -z "$lock_owner" || "$lock_owner" == "$(owner_id)" ]] || die "heartbeat: $serial is owned by another agent"
+  touch "$LOCK_ROOT/$serial/last_used"
+}
+
+cmd_status() {
+  mkdir -p "$LOCK_ROOT"
+  local booted d serial avd branch age state h oid
+  booted="$(adb_booted_serials || true)"
+  printf '%-16s %-24s %-30s %-10s %-8s %s\n' "SERIAL" "AVD" "OWNER (branch)" "OWNER_ID" "IDLE" "DEVICE"
+  local found=0
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] || continue
+    found=1
+    serial="$(basename "$d")"
+    avd="$(meta_get "$serial" AVD)"
+    branch="$(meta_get "$serial" OWNER_BRANCH)"
+    oid="$(meta_get "$serial" OWNER_ID)"
+    age="$(lease_age "$serial")"
+    if [[ -n "$age" ]]; then h="$(( age / 60 ))m"; (( age >= 3600 )) && h="$(( age / 3600 ))h$(( (age % 3600) / 60 ))m"; else h="?"; fi
+    if echo "$booted" | grep -qx "$serial"; then state="booted"
+    elif adb_all_serials | grep -qx "$serial"; then state="offline"
+    else state="absent"; fi
+    is_stale "$serial" && state="$state (STALE)"
+    printf '%-16s %-24s %-30s %-10s %-8s %s\n' "$serial" "${avd:-?}" "${branch:-?}" "${oid:0:8}" "$h" "$state"
+  done
+  (( found )) || echo "(no locks)"
+  # Unclaimed but running devices are the free pool.
+  for serial in $booted; do
+    [[ -d "$LOCK_ROOT/$serial" ]] || printf '%-16s %-24s %-30s %-10s %-8s %s\n' "$serial" "$(avd_of_serial "$serial")" "-" "-" "-" "booted, UNCLAIMED (free)"
+  done
+}
+
+cmd_reap() {
+  mkdir -p "$LOCK_ROOT"
+  reap_stale verbose
+  echo "reap done."
+}
+
+# Report whether enforcement is actually wired up, and print the fix if it is
+# not. Strictly read-only.
+#
+# It does NOT install the hook, and neither does the skill. A PreToolUse hook is
+# the thing that constrains what an agent may run; a hook an agent can install is
+# a hook an agent can uninstall, and self-installing enforcement is not
+# enforcement. Agent harnesses already treat editing hook files as
+# self-modification and refuse it -- correctly. So the human wires it once, and
+# this command exists so an agent can *check* and report rather than guess, or
+# worse, try to "fix" it.
+cmd_doctor() {
+  local problems=0
+  say() { printf '  %s  %s\n' "$1" "$2"; }
+  good() { say "ok  " "$1"; }
+  warn() { problems=$((problems + 1)); say "WARN" "$1"; }
+
+  echo "emulock doctor"
+  echo
+
+  command -v python3 >/dev/null 2>&1 && good "python3 found" || warn "python3 not on PATH (needed by emulock-lab)"
+  command -v adb >/dev/null 2>&1 && good "adb found" || warn "adb not on PATH — install Android platform-tools"
+  [[ -d "$SDK" ]] && good "Android SDK at $SDK" || warn "no SDK at $SDK — set ANDROID_HOME"
+
+  if mkdir -p "$LOCK_ROOT" 2>/dev/null && [[ -w "$LOCK_ROOT" ]]; then
+    good "lock store writable: $LOCK_ROOT"
+  else
+    warn "lock store not writable: $LOCK_ROOT"
+  fi
+
+  local owner; owner="$(owner_id)"
+  case "$owner" in
+    manual:*) warn "identity is '$owner' — advisory only, nothing will be blocked.
+         Enforcement needs a harness that exposes a per-session id, or set
+         EMULATOR_LOCK_OWNER yourself." ;;
+    *) good "session identity: $owner" ;;
+  esac
+
+  # Find the guard next to this script, however it was installed or symlinked.
+  local self real here guard=""
+  self="${BASH_SOURCE[0]}"
+  real="$(readlink "$self" 2>/dev/null || printf '%s' "$self")"
+  case "$real" in /*) ;; *) real="$(cd "$(dirname "$self")" && pwd)/$real" ;; esac
+  here="$(cd "$(dirname "$real")" && pwd)"
+  for candidate in "$here/../hooks/claude-code/emulock-guard.sh" \
+                   "$HOME/.local/share/emulock/hooks/claude-code/emulock-guard.sh"; do
+    [[ -f "$candidate" ]] || continue
+    # Normalise away the ../ so the path we print is one a human can paste.
+    guard="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    break
+  done
+
+  if [[ -z "$guard" ]]; then
+    warn "guard hook not found — reinstall with ./install.sh"
+  elif [[ ! -x "$guard" ]]; then
+    warn "guard found but not executable: chmod +x '$guard'"
+  else
+    good "guard hook present"
+    # Is it wired into a settings file anywhere up from here?
+    local dir="$PWD" wired=""
+    while [[ "$dir" != "/" ]]; do
+      for f in "$dir/.claude/settings.json" "$dir/.claude/settings.local.json"; do
+        [[ -f "$f" ]] && grep -q 'emulock-guard\.sh' "$f" 2>/dev/null && wired="$f"
+      done
+      [[ -n "$wired" ]] && break
+      dir="$(dirname "$dir")"
+    done
+    if [[ -n "$wired" ]]; then
+      good "wired into $wired"
+    else
+      warn "guard is NOT wired into any settings.json above $PWD.
+         Locks are advisory until it is. Add this yourself — emulock will not
+         edit an agent's permission config, and neither should your agent:
+
+         {\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",
+           \"hooks\":[{\"type\":\"command\",\"command\":\"$guard\"}]}]}}"
+    fi
+  fi
+
+  echo
+  if (( problems )); then
+    echo "$problems issue(s). emulock still coordinates, but nothing is enforced"
+    echo "until the warnings above are resolved."
+    return 1
+  fi
+  echo "All good — reservations are enforced on this machine."
+  return 0
+}
+
+main() {
+  local args=() a cmd=""
+  for a in "$@"; do
+    case "$a" in
+    --help|-h) usage; exit 0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) args+=("$a") ;;
+    esac
+  done
+  set -- ${args[@]+"${args[@]}"}
+  cmd="${1:-}"
+  [[ -n "$cmd" ]] || { usage; exit 1; }
+  shift
+  case "$cmd" in
+  claim) cmd_claim "$@" ;;
+  reclaim) cmd_reclaim "$@" ;;
+  release) cmd_release "$@" ;;
+  heartbeat) cmd_heartbeat "$@" ;;
+  status) cmd_status "$@" ;;
+  reap) cmd_reap "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  *) die "unknown command: $cmd (claim|reclaim|release|heartbeat|status|reap|doctor)" ;;
+  esac
+}
+
+main "$@"

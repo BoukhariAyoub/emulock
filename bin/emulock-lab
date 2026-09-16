@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#
+# emulock-lab — live browser view of this machine's emulator reservations.
+#
+# Read-only. It enumerates the lock store, asks adb which emulators are
+# actually attached, and lists the AVDs installed in the SDK. It never claims,
+# releases, boots or targets a device, so it is safe to run alongside any
+# number of agent sessions.
+#
+#   emulock-lab                 serve on 127.0.0.1:7337 and open a browser
+#   emulock-lab --port 7400
+#   emulock-lab --no-open       serve only
+#   emulock-lab --json          one snapshot to stdout, then exit
+#   emulock-lab --help
+#
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)"
+exec python3 "$HERE/../libexec/device_lab.py" "$@"
