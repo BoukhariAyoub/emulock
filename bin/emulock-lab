@@ -14,5 +14,18 @@
 #   emulock-lab --help
 #
 set -euo pipefail
-HERE="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)"
+# Resolve this script's real directory, following a chain of symlinks and
+# resolving each relative link against the directory of the link itself.
+# Homebrew installs bin/ entries as *relative* symlinks into ../Cellar/..., so
+# a naive `readlink` + `cd` resolves against the caller's cwd and fails.
+resolve_here() {
+  local src="$1" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+HERE="$(resolve_here "${BASH_SOURCE[0]}")"
 exec python3 "$HERE/../libexec/device_lab.py" "$@"

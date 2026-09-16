@@ -89,7 +89,11 @@ EMU_BIN="$SDK/emulator/emulator"
 DRY_RUN=0
 
 die() { echo "emulator-lock: $*" >&2; exit 1; }
-usage() { sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'; }
+# Print the header comment block as help. Reads to the end of the block rather
+# than a fixed line range: the old '2,67p' silently dropped every line the
+# header grew past 67, which had already swallowed the environment-variable
+# section and the global options.
+usage() { awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; }
 
 command -v adb >/dev/null 2>&1 || die "adb not on PATH"
 
@@ -548,6 +552,20 @@ cmd_reap() {
 # self-modification and refuse it -- correctly. So the human wires it once, and
 # this command exists so an agent can *check* and report rather than guess, or
 # worse, try to "fix" it.
+# Resolve this script's real directory, following a chain of symlinks and
+# resolving each relative link against the directory of the link itself.
+# Homebrew installs bin/ entries as *relative* symlinks into ../Cellar/..., so
+# a naive `readlink` + `cd` resolves against the caller's cwd and fails.
+resolve_here() {
+  local src="$1" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
 cmd_doctor() {
   local problems=0
   say() { printf '  %s  %s\n' "$1" "$2"; }
@@ -595,12 +613,12 @@ cmd_doctor() {
   esac
 
   # Find the guard next to this script, however it was installed or symlinked.
-  local self real here guard=""
-  self="${BASH_SOURCE[0]}"
-  real="$(readlink "$self" 2>/dev/null || printf '%s' "$self")"
-  case "$real" in /*) ;; *) real="$(cd "$(dirname "$self")" && pwd)/$real" ;; esac
-  here="$(cd "$(dirname "$real")" && pwd)"
+  local here guard=""
+  here="$(resolve_here "${BASH_SOURCE[0]}")"
+  # Repo checkout, Homebrew (hooks land in share/emulock via pkgshare), then
+  # the location install.sh links to.
   for candidate in "$here/../hooks/claude-code/emulock-guard.sh" \
+                   "$here/../share/emulock/hooks/claude-code/emulock-guard.sh" \
                    "$HOME/.local/share/emulock/hooks/claude-code/emulock-guard.sh"; do
     [[ -f "$candidate" ]] || continue
     # Normalise away the ../ so the path we print is one a human can paste.
