@@ -60,24 +60,40 @@ flowchart TB
     HOOK["<b>PreToolUse hook</b> — runs before the command, inside the agent harness<br/>who owns emulator-5556?"]
 
     HOOK -->|"caller owns it"| OK["<b>Executes</b><br/>lease refreshed, action recorded"]
-    HOOK -->|"caller does not"| NO["<b>Refused</b><br/>never reaches adb"]
+    HOOK -->|"caller does not"| NO["<b>Refused</b> — never reaches adb<br/>names the owner and their branch,<br/>plus the state of the pool"]
+
+    NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>claim your own: emulock claim”"]
+    NO --> BUSY["<i>nothing is free</i><br/>“all 5 held, earliest frees in 1h 42m —<br/>report this rather than taking one”"]
+
     OK --> LAB["<b>emulock-lab</b> :7337 — who holds what, lease left, what each is doing"]
 
     classDef n fill:#161b22,stroke:#484f58,color:#c9d1d9
     classDef h fill:#12203a,stroke:#3b82f6,color:#cfe3ff,stroke-width:2px
     classDef p fill:#0f2417,stroke:#2ea043,color:#a7f3c0
     classDef d fill:#2a1416,stroke:#da3633,color:#ffc9c4
+    classDef o fill:#1c1917,stroke:#78716c,color:#d6d3d1
     classDef q fill:#0d1117,stroke:#30363d,color:#8b949e
     class A,B,LS,CA,CB n
     class HOOK h
     class OK p
     class NO d
+    class FREE,BUSY o
     class LAB q
 ```
 
 The hook is the whole trick. It sits in the agent harness — not in a wrapper script the
 agent could sidestep, not in a linter it could ignore — so a device-stomping command is
 stopped before it ever reaches `adb`.
+
+A refusal is the one message an agent reads at the exact moment it needs direction, so it
+carries the state of the pool: how many devices are held, how many leases have expired and
+are reclaimable now, and when the next one frees. That distinction decides the agent's next
+move — **claim one**, or **stop and tell you**. A generic "claim a device first" leaves it
+guessing, and a guessing agent retries in a loop.
+
+It reports a count, never a specific serial: two agents refused in the same instant would
+both be sent after the same device, and one would lose a race it had just been promised.
+`emulock claim` does the atomic tie-break itself.
 
 The failures above stop being possible:
 

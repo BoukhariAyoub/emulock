@@ -118,6 +118,13 @@ test_guard() {
   group "guard: prose must not trip enforcement"
   is "adb inside a quoted string"  "$(dec "git commit -m 'never run adb kill-server'")" allow
   is "adb inside a heredoc"        "$(dec "$(printf 'cat <<EOF\nadb kill-server\nEOF')")" allow
+  # Regression: sed strips quotes a line at a time, so a multi-line quoted
+  # argument used to keep everything after its first line -- a git commit whose
+  # message mentioned adb kill-server was refused by its own guard.
+  is "adb in a multi-line commit message" \
+     "$(dec "$(printf 'git commit -m "Fix the thing\n\nNever run adb kill-server here.\n\nIt drops every device."')")" allow
+  is "adb in a multi-line echo" \
+     "$(dec "$(printf 'echo "line one\nadb -s emulator-5601 shell ls\nline three"')")" allow
 
   group "guard: activity classification"
   is "maestro flow"      "$(act "maestro test --device $MINE flows/live-show/guest.yaml")" "Running flow|live-show/guest.yaml"
@@ -155,6 +162,52 @@ test_guard() {
   is "no recording on another session's device" "$(cat "$STORE/$THEIRS/last_used")" ""
   hook "adb -s $THEIRS shell ls" >/dev/null
   is "denied command records nothing"           "$(cat "$STORE/$THEIRS/last_used")" ""
+
+  group "guard: a refusal says what to do next"
+  # The message an agent reads at the moment it needs direction must differ by
+  # pool state -- "claim one" and "stop and tell the human" are opposite actions.
+  local hint_probe hint now
+  hint_probe="$(mktemp -d)"
+  now="$(date +%s)"
+  mk_lock() { # mk_lock <serial> <idle-seconds>
+    mkdir -p "$hint_probe/$1"
+    printf 'SERIAL=%s\nOWNER_ID=claude-code:someone\nOWNER_BRANCH=feat/x\n' "$1" >"$hint_probe/$1/meta"
+    : >"$hint_probe/$1/last_used"
+    touch -t "$(date -r $((now - $2)) +%Y%m%d%H%M.%S)" "$hint_probe/$1/last_used"
+  }
+  ask_hint() {
+    printf '%s' "adb -s emulator-5599 shell ls" \
+      | python3 -c 'import json,sys; print(json.dumps({"session_id":"'"$SESSION"'","tool_input":{"command":sys.stdin.read()}}))' \
+      | EMULATOR_LOCK_DIR="$hint_probe" CLAUDE_CODE_SESSION_ID="$SESSION" /bin/bash "$GUARD" 2>/dev/null \
+      | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecisionReason"])
+except Exception: print("")'
+  }
+
+  hint="$(ask_hint)"
+  has "empty pool tells you to claim" "$hint" "No devices are claimed"
+
+  mk_lock emulator-5599 600
+  mk_lock emulator-5601 9240
+  hint="$(ask_hint)"
+  has "fully-booked pool says stop"      "$hint" "Report this to the user"
+  has "...and when one frees up"         "$hint" "frees in"
+  case "$hint" in
+    *"claim your own"*) bad "fully-booked pool does not say claim" "no claim advice" "$hint" ;;
+    *) ok "fully-booked pool does not say claim" ;;
+  esac
+
+  mk_lock emulator-5603 20000
+  hint="$(ask_hint)"
+  has "expired lease is surfaced as reclaimable" "$hint" "expired lease and reclaimable now"
+
+  # Never name a serial: two agents refused at once would race for it.
+  case "$hint" in
+    *"emulock claim emulator-"*|*"claim emulator-5"*)
+      bad "hint never names a specific serial" "a count, not a serial" "$hint" ;;
+    *) ok "hint never names a specific serial" ;;
+  esac
+  rm -rf "$hint_probe"
 
   group "guard: lease"
   : >"$STORE/$MINE/last_used"

@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
 #
-# emulator-guard.sh — Claude Code PreToolUse hook (matcher: Bash; wired via
-# the git-committed settings.json — no install step, unlike Cursor's
-# hook, which is user-level and needs install.sh
-# run once per machine. Every contributor gets this one for free just by
-# having the repo checked out.)
+# emulock-guard.sh — Claude Code PreToolUse hook (matcher: Bash).
 #
-# Hard-blocks shell commands that touch emulator devices this Claude Code
-# session has not claimed through emulock. This is a
-# straight port of the original Cursor guard's matching logic to Claude Code's
-# hook I/O contract — same cases, same lock store:
+# Refuses shell commands that touch emulator devices this session has not
+# claimed through `emulock`. Wire it in settings.json; commit that file and
+# every contributor gets enforcement with no install step of their own.
 #
-#   deny  adb kill-server                        (drops every agent's devices)
-#   deny  adb -s emulator-XXXX ...               unless this session owns the lock
-#   deny  device-targeting adb without -s        (bare `adb shell`, `adb install`, ...)
-#   deny  emulator @AVD launches                 without -port on a lock we own
-#   deny  direct writes to ~/.emulator-locks     (only emulock may manage it)
-#   allow everything else (device-agnostic adb, physical-device serials,
-#         emulock itself, unrelated commands) — by staying silent
-#         (exit 0, no output), which defers to Claude Code's normal permission
-#         flow exactly as if this hook hadn't run at all.
+#   deny  adb kill-server                     drops every agent's devices at once
+#   deny  adb -s emulator-XXXX ...            unless this session owns the lock
+#   deny  device-targeting adb without -s     bare `adb shell`, `adb install`, ...
+#   deny  emulator @AVD launches              without the -port of a lock we own
+#   deny  direct writes to the lock store     only `emulock` may manage it
+#   allow everything else — by staying silent (exit 0, no output), which defers
+#         to the harness's normal permission flow exactly as if this hook had
+#         not run at all. Device-agnostic adb, physical serials, `emulock`
+#         itself and unrelated commands all fall through here.
 #
 # On every allowed device command it refreshes the lock's lease (last_used) and
 # records what that command is about to do -- a fixed verb plus one narrowly
@@ -27,22 +22,19 @@
 # command itself. See the activity section below for why, and for why the verb
 # table matches tools rather than any project's wrapper scripts.
 #
-# Identity: Claude Code exposes a stable per-session id directly in the shell
-# environment (CLAUDE_CODE_SESSION_ID, also present as .session_id in this
-# hook's own stdin payload) — no payload-rewriting injection hook needed like
-# Cursor's emulator-identity.sh (Cursor's shell has no native visibility into
-# its conversation id, so a preToolUse hook has to rewrite the command to
-# inject it). emulock's owner_id() picks the same env var up
-# automatically, so this guard's notion of "this session" always matches what
-# emulock recorded when it claimed the lock — no spoof-check needed
-# either (there is no command-text injection here to spoof).
+# Identity: Claude Code exposes a stable per-session id in the shell environment
+# (CLAUDE_CODE_SESSION_ID, also present as .session_id in this hook's stdin
+# payload). `emulock` reads the same variable, so the guard's notion of "this
+# session" always matches what was recorded when the lock was claimed. Set
+# EMULATOR_LOCK_OWNER to give another harness a stable identity; without either,
+# identity falls back to manual:$USER and locks are advisory only.
 #
-# Known limitations: only the top-level command string is inspected. Wrapper
-# scripts that call adb internally (e.g. a project's own test wrapper) are not policed;
-# they are expected to claim via emulock themselves. Quoted strings and
-# heredoc bodies are stripped before matching (so commit messages / PR bodies
-# mentioning adb don't false-positive), which also means `bash -c "adb ..."`
-# escapes inspection — the guard is anti-accident, not anti-adversarial.
+# Known limitations: only the top-level command string is inspected. A wrapper
+# script that calls adb internally is not policed; it is expected to claim for
+# itself. Quoted strings and heredoc bodies are stripped before matching, so a
+# commit message mentioning adb does not trip enforcement -- which also means
+# `bash -c "adb ..."` escapes inspection. This is anti-accident, not
+# anti-adversarial.
 
 set -uo pipefail
 
@@ -82,7 +74,7 @@ lock_avd() { sed -n 's/^AVD=//p' "$LOCK_ROOT/$1/meta" 2>/dev/null; }
 # the write is backward compatible and refreshes the lease in the same step.
 #
 # Matching is on the tool, never on a project's wrapper: `maestro test` is
-# portable, `a project's own test wrapper` is one repo's convention. Nothing here may
+# portable, `./scripts/run-e2e.sh` is one repo's convention. Nothing here may
 # assume a directory layout, a tracker's id format, or a particular agent
 # harness -- a project that has none of those still gets a useful verb.
 #
@@ -208,13 +200,76 @@ touch_lease() {
   return 0
 }
 
-CLAIM_HINT="Claim a device first: emulock claim (protocol: the README). Check owners with: emulock status"
+# --- what to do next ---------------------------------------------------------
+#
+# A refusal is the one message an agent reads at the exact moment it needs
+# direction, so it has to carry the answer. The old hint was identical whether
+# three devices were free or none -- two situations demanding opposite
+# behaviour: claim one, versus stop and tell the human. Given only the generic
+# hint, an agent retries in a loop.
+#
+# Computed from the lock store alone -- directory names and mtimes, no
+# subprocesses. This hook runs before *every* shell command, so the work is
+# confined to the deny paths, and even there it must not shell out. In
+# particular it must never call `adb`: that implicitly starts the adb daemon,
+# and a refusal has no business spawning a background server.
+#
+# It reports a count, never a specific serial. Two agents refused in the same
+# instant would both be pointed at the same device and one would lose a race it
+# had just been promised. `emulock claim` does the atomic mkdir tie-break.
+
+IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
+
+mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+human_secs() { # 9240 -> "2h 34m"
+  local s="$1" h m
+  [[ "$s" -lt 60 ]] && { echo "under a minute"; return 0; }
+  h=$(( s / 3600 )); m=$(( (s % 3600) / 60 ))
+  if [[ "$h" -gt 0 ]]; then echo "${h}h ${m}m"; else echo "${m}m"; fi
+}
+
+availability_hint() {
+  local now held=0 expired=0 soonest="" d idle left stamp
+  now="$(date +%s)"
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] || continue
+    held=$(( held + 1 ))
+    stamp="$(mtime_of "$d/last_used")"
+    idle=$(( now - stamp ))
+    if [[ "$idle" -ge "$IDLE_TTL" ]]; then
+      expired=$(( expired + 1 ))
+    else
+      left=$(( IDLE_TTL - idle ))
+      if [[ -z "$soonest" || "$left" -lt "$soonest" ]]; then soonest="$left"; fi
+    fi
+  done
+
+  if [[ "$held" -eq 0 ]]; then
+    echo "No devices are claimed right now — claim one: emulock claim"
+  elif [[ "$expired" -gt 0 ]]; then
+    echo "$held held, $expired with an expired lease and reclaimable now — claim your own: emulock claim"
+  elif [[ -n "$soonest" ]]; then
+    echo "All $held are held and none are reclaimable; the earliest lease frees in $(human_secs "$soonest"). Report this to the user rather than taking a device that isn't yours."
+  else
+    echo "Claim a device first: emulock claim"
+  fi
+}
+
+CLAIM_HINT="Claim a device first: emulock claim. Check owners with: emulock status"
 
 [[ -z "$CMD" ]] && allow
 
 # Strip heredoc bodies and quoted strings before matching: prose in commit
 # messages, PR bodies, and echo strings legitimately mentions adb/emulator and
 # must not trip enforcement. Real device commands live outside quotes.
+#
+# The newlines are joined before the quote strip because sed works a line at a
+# time: a multi-line "..." argument would otherwise have only its first line
+# removed, and the rest matched as if it were a command. A `git commit -m` with
+# a multi-paragraph message mentioning adb was refused this way -- the exact
+# false positive the stripping exists to prevent. Matching does not depend on
+# line structure, so folding to one line costs nothing.
 strip_prose() {
   awk '
     skip {
@@ -229,7 +284,7 @@ strip_prose() {
       next
     }
     { print }
-  ' | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g'
+  ' | tr '\n' ' ' | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g'
 }
 SCMD="$(printf '%s\n' "$CMD" | strip_prose)"
 
@@ -249,8 +304,8 @@ if echo "$SCMD" | grep -q '\.emulator-locks' && [[ "$CMD" != *emulock* ]]; then
 fi
 
 # --- emulock itself: always allowed. Nothing to spoof-check here —
-# unlike Cursor, there is no injection hook rewriting this command, so
-# EMULATOR_LOCK_OWNER (if set at all) is this session's own real environment. ---
+# nothing rewrites this command on its way here, so EMULATOR_LOCK_OWNER (if set
+# at all) comes from this session's own environment. ---
 if [[ "$CMD" == *emulock* ]]; then
   allow
 fi
@@ -260,7 +315,7 @@ if (( has_adb )); then
   serials="$(echo "$SCMD" | grep -oE -- '(-s|--serial)[[:space:]=]+emulator-[0-9]+' | grep -oE 'emulator-[0-9]+' | sort -u)"
   for serial in $serials; do
     if [[ ! -d "$LOCK_ROOT/$serial" ]]; then
-      deny "$serial is not claimed by anyone — you may not use unclaimed devices. $CLAIM_HINT"
+      deny "$serial is not claimed by anyone — you may not use an unclaimed device. $(availability_hint)"
     fi
     owner="$(lock_owner "$serial")"
     if [[ -z "$owner" ]]; then
@@ -268,7 +323,7 @@ if (( has_adb )); then
       continue
     fi
     if [[ "$owner" != "$ME" ]]; then
-      deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't claim. $CLAIM_HINT"
+      deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't claim. $(availability_hint)"
     fi
     touch_lease "$serial"
   done
@@ -276,7 +331,7 @@ if (( has_adb )); then
   # --- device-targeting adb without any -s: ambiguous and dangerous ---
   if [[ -z "$serials" ]] && ! echo "$SCMD" | grep -qE -- '(-s|--serial)[[:space:]=]'; then
     if echo "$SCMD" | grep -qE 'adb[[:space:]]+(wait-for-[a-z]+|shell|install|install-multiple|uninstall|push|pull|logcat|exec-out|emu|reboot|sideload|forward|reverse|backup|restore|root|unroot|remount|tcpip|usb|jdwp|bugreport|get-state|get-serialno|snapshot)([[:space:]]|$)'; then
-      deny "Bare device-targeting adb is forbidden — always target your claimed serial explicitly: adb -s <your-serial> ... $CLAIM_HINT"
+      deny "Bare device-targeting adb is forbidden — always target your claimed serial explicitly: adb -s <your-serial> ... $(availability_hint)"
     fi
   fi
 fi
@@ -289,11 +344,11 @@ if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])emulator[[:space:]]+[^;|&]*(@[A-
   fi
   serial="emulator-$port"
   if [[ ! -d "$LOCK_ROOT/$serial" ]]; then
-    deny "Port $port is not reserved. $CLAIM_HINT"
+    deny "Port $port is not reserved. $(availability_hint)"
   fi
   owner="$(lock_owner "$serial")"
   if [[ -n "$owner" && "$owner" != "$ME" ]]; then
-    deny "Port $port is reserved by another agent (branch: $(lock_branch "$serial")). $CLAIM_HINT"
+    deny "Port $port is reserved by another agent (branch: $(lock_branch "$serial")). $(availability_hint)"
   fi
   launched_avd="$(echo "$SCMD" | grep -oE '@[A-Za-z0-9_.-]+' | head -n1 | tr -d '@')"
   [[ -z "$launched_avd" ]] && launched_avd="$(echo "$SCMD" | grep -oE -- '-avd[[:space:]]+[A-Za-z0-9_.-]+' | awk '{print $2}' | head -n1)"

@@ -8,10 +8,9 @@
 #   avd-<name>/meta            one dir per AVD; two claims can never boot the same AVD
 #
 # Identity — two harnesses, resolved in this priority order by owner_id():
-#   1. EMULATOR_LOCK_OWNER    explicit override, honoured first if set. Kept for
-#                             external drivers (and historically for Cursor, whose
-#                             shell had no conversation-id visibility and needed a
-#                             hook to inject one per command). Normally unset.
+#   1. EMULATOR_LOCK_OWNER    explicit override, honoured first if set. For an
+#                             external driver, or a harness whose shell exposes no
+#                             stable per-session id of its own. Normally unset.
 #   2. CLAUDE_CODE_SESSION_ID Claude Code CLI already exposes a stable per-session
 #                             id directly in the shell environment — no injection
 #                             hook needed. Recorded as "claude-code:<id>".
@@ -63,8 +62,8 @@
 # never be reaped.
 #
 # Environment:
-#   EMULATOR_LOCK_OWNER     owner identity override (Cursor hook-injected; see
-#                           owner_id() for the full Cursor > Claude Code > manual
+#   EMULATOR_LOCK_OWNER     owner identity override (see owner_id() for the
+#                           full override > harness session id > manual
 #                           fallback chain)
 #   EMULATOR_LOCK_DIR       lock store         (default: ~/.emulator-locks)
 #   EMULATOR_LOCK_IDLE_TTL  idle lease seconds (default: 14400)
@@ -98,7 +97,7 @@ now() { date +%s; }
 
 owner_id() {
   if [[ -n "${EMULATOR_LOCK_OWNER:-}" ]]; then
-    echo "$EMULATOR_LOCK_OWNER"                        # Cursor hook injection
+    echo "$EMULATOR_LOCK_OWNER"                        # explicit override
   elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
     echo "claude-code:$CLAUDE_CODE_SESSION_ID"          # Claude Code CLI, native env var
   else
@@ -282,6 +281,29 @@ print_boot_hint() { # print_boot_hint <serial> <avd>
   echo "use it as: adb -s $1 ..."
 }
 
+# When a claim cannot be satisfied, say when one frees up. Without this an agent
+# is told only that it failed, which invites a retry loop; with it, the correct
+# move (wait, or tell the human) is obvious from the message itself.
+next_free_hint() {
+  local now soonest="" d idle left h m
+  now="$(now)"
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -d "$d" ]] || continue
+    idle="$(lease_age "${d##*/}")"
+    [[ -z "$idle" ]] && continue
+    [[ "$idle" -ge "$IDLE_TTL" ]] && { echo "A lease has already expired — run: emulock reap, then claim again."; return 0; }
+    left=$(( IDLE_TTL - idle ))
+    if [[ -z "$soonest" || "$left" -lt "$soonest" ]]; then soonest="$left"; fi
+  done
+  [[ -z "$soonest" ]] && { echo "Run: emulock status"; return 0; }
+  h=$(( soonest / 3600 )); m=$(( (soonest % 3600) / 60 ))
+  if [[ "$h" -gt 0 ]]; then
+    echo "The earliest lease frees in ${h}h ${m}m. Tell the user rather than taking a device that isn't yours."
+  else
+    echo "The earliest lease frees in ${m}m. Tell the user rather than taking a device that isn't yours."
+  fi
+}
+
 cmd_claim() {
   local want_avd="" require_booted=0 note="" serial avd port used_avds candidate
   local our_serial our_avd released_avd="" additional=0
@@ -367,7 +389,7 @@ cmd_claim() {
     if [[ "$DRY_RUN" == 1 ]]; then port="$candidate"; break; fi
     if try_lock "emulator-$candidate"; then port="$candidate"; break; fi
   done
-  [[ -z "$port" ]] && die "claim: no free emulator port (5554-5584) — release something or reap"
+  [[ -z "$port" ]] && die "claim: every emulator port (5554-5584) is reserved. $(next_free_hint)"
   serial="emulator-$port"
 
   used_avds="$(avds_in_use)"
@@ -400,7 +422,7 @@ cmd_claim() {
   fi
   if [[ -z "$avd" ]]; then
     [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
-    die "claim: no free AVD — all in use (create another AVD clone or release one)"
+    die "claim: every installed AVD is in use. Create another AVD, or wait. $(next_free_hint)"
   fi
 
   if [[ "$DRY_RUN" == 1 ]]; then
