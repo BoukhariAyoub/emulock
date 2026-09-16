@@ -209,6 +209,20 @@ except Exception: print("")'
   esac
   rm -rf "$hint_probe"
 
+  group "guard: degrades safely when jq is missing"
+  # A hook that cannot parse its input must allow, not deny: denying on its own
+  # breakage would block every shell command on the machine with no way to
+  # repair it. The cost is that enforcement disappears silently, which is why
+  # `emulock doctor` checks for jq explicitly.
+  local nojq_probe nojq_out
+  nojq_probe="$(mktemp -d)"
+  sed 's|^JQ=.*|JQ="/nonexistent/jq"|' "$GUARD" >"$nojq_probe/guard.sh"
+  nojq_out="$(printf '%s' "adb -s $THEIRS shell ls" \
+    | python3 -c 'import json,sys; print(json.dumps({"session_id":"'"$SESSION"'","tool_input":{"command":sys.stdin.read()}}))' \
+    | EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" /bin/bash "$nojq_probe/guard.sh" 2>&1)"
+  is "no jq means allow, never a machine-wide deny" "$nojq_out" ""
+  rm -rf "$nojq_probe"
+
   group "guard: lease"
   : >"$STORE/$MINE/last_used"
   local before after
@@ -285,6 +299,7 @@ test_lock() {
   out="$(cd "$probe" && EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
          "$LOCK" doctor 2>&1)"
   has "doctor finds the guard"          "$out" "guard hook present"
+  has "doctor checks for jq"            "$out" "jq"
   has "doctor reports session identity" "$out" "claude-code:$SESSION"
   has "doctor flags an unwired hook"    "$out" "NOT wired"
   case "$out" in

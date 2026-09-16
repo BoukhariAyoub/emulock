@@ -130,7 +130,14 @@ corrupt the image. That scarcity is what makes locking worth enforcing.
 
 ## Install
 
-Requires bash, python3, and the Android SDK platform-tools. macOS and Linux.
+Requires `bash`, `jq`, `python3`, and the Android SDK platform-tools. macOS and Linux.
+
+> **`jq` is not optional.** The guard parses the harness payload with it, and a hook
+> that cannot parse its input exits 0 — which means *allow*. Without `jq`, `claim` and
+> `status` still work and **nothing is enforced, silently.** It can't fail closed
+> instead: a hook that denied on its own breakage would block every shell command on
+> the machine with no way to repair it. `/usr/bin/jq` ships only on macOS 15+, so on
+> older macOS run `brew install jq`. `emulock doctor` checks for it.
 
 ```bash
 git clone https://github.com/BoukhariAyoub/emulock.git

@@ -557,6 +557,25 @@ cmd_doctor() {
   echo "emulock doctor"
   echo
 
+  # jq first: it is the one missing dependency that fails *silently*. The guard
+  # parses the harness payload with it, and a failed parse exits 0 -- which a
+  # PreToolUse hook means as "allow". So without jq every command is permitted
+  # and nothing warns you: claim works, status works, and enforcement is simply
+  # gone. It cannot fail closed instead, because a hook that denies on its own
+  # breakage would block every shell command on the machine with no way to
+  # repair it. Hence: fail open, and catch it here.
+  #
+  # Not a safe assumption on macOS -- /usr/bin/jq ships only on macOS 15 and
+  # later, so a Sonoma machine without Homebrew jq silently enforces nothing.
+  if command -v jq >/dev/null 2>&1; then
+    good "jq found ($(command -v jq))"
+  else
+    warn "jq NOT FOUND — the guard cannot parse the harness payload, so it allows
+         everything and says nothing. Locks are advisory until you install it:
+             macOS:  brew install jq
+             Debian: sudo apt install jq"
+  fi
+
   command -v python3 >/dev/null 2>&1 && good "python3 found" || warn "python3 not on PATH (needed by emulock-lab)"
   command -v adb >/dev/null 2>&1 && good "adb found" || warn "adb not on PATH — install Android platform-tools"
   [[ -d "$SDK" ]] && good "Android SDK at $SDK" || warn "no SDK at $SDK — set ANDROID_HOME"
