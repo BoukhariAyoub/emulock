@@ -2,6 +2,8 @@
 
 **Stop parallel coding agents from fighting over the same Android emulator.**
 
+![emulock-lab — the read-only dashboard](docs/device-lab.png)
+
 ## The problem
 
 You run three or four coding agents at once, because that is the whole point of agents.
@@ -45,6 +47,11 @@ That is not a warning the agent can read and ignore. The command never runs.
 
 ## How it works
 
+![How emulock works](docs/how-it-works.png)
+
+<details>
+<summary>Same diagram as text</summary>
+
 ```
          Agent A                                    Agent B
             │                                          │
@@ -61,32 +68,33 @@ That is not a warning the agent can read and ignore. The command never runs.
             ▼                                          ▼
    adb -s 5556 install app.apk               adb -s 5556 shell input tap
             │                                          │
-            └──────────────────┐        ┌──────────────┘
-                               ▼        ▼
-            ╔═══════════════════════════════════════════╗
-            ║   PreToolUse hook — runs BEFORE the        ║
-            ║   command, inside the agent harness        ║
-            ║                                           ║
-            ║   who owns emulator-5556?                 ║
-            ╚═════════════╦═══════════════╦═════════════╝
-                          ║               ║
-             caller owns it               caller does not
-                          ║               ║
-                          ▼               ▼
-              ┌───────────────────┐   ┌──────────────────────┐
-              │ command executes  │   │ REFUSED              │
-              │                   │   │                      │
-              │ lease refreshed   │   │ never reaches adb    │
-              │ "Installing" and  │   │ message names the    │
-              │ its target logged │   │ owner and the branch │
-              └─────────┬─────────┘   └──────────────────────┘
-                        │
-                        ▼
-                  ┌────────────┐
-                  │ emulock-lab│ read-only dashboard: who holds what,
-                  │   :7337    │ lease remaining, what each is doing
-                  └────────────┘
+            └───────────────────┐       ┌──────────────┘
+                                ▼       ▼
+        ┌──────────────────────────────────────────────────┐
+        │  PreToolUse hook                                 │
+        │  runs BEFORE the command, in the agent harness   │
+        │                                                  │
+        │  who owns emulator-5556?                         │
+        └───────────────┬──────────────────┬───────────────┘
+                        │                  │
+                 caller owns it     caller does not
+                        │                  │
+                        ▼                  ▼
+          ┌───────────────────────┐   ┌──────────────────────┐
+          │  command executes     │   │  REFUSED             │
+          │                       │   │                      │
+          │  lease refreshed      │   │  never reaches adb   │
+          │  "Installing" and its │   │  message names the   │
+          │  target recorded      │   │  owner and branch    │
+          └───────────┬───────────┘   └──────────────────────┘
+                      │
+                      ▼
+          ┌───────────────────────┐
+          │  emulock-lab  :7337   │  read-only dashboard: who holds
+          └───────────────────────┘  what, lease left, what each does
 ```
+
+</details>
 
 The hook is the whole trick. It sits in the agent harness — not in a wrapper script the
 agent could sidestep, not in a linter it could ignore — so a device-stomping command is

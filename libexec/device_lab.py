@@ -23,7 +23,15 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-LOCK_ROOT = Path(os.environ.get("EMULATOR_LOCK_ROOT", Path.home() / ".emulator-locks"))
+# EMULATOR_LOCK_DIR is the documented name and what the emulock CLI reads;
+# EMULATOR_LOCK_ROOT is accepted because this file used to read only that, and
+# a dashboard silently watching a different store than the CLI writes to is the
+# most confusing failure this tool could have.
+LOCK_ROOT = Path(
+    os.environ.get("EMULATOR_LOCK_DIR")
+    or os.environ.get("EMULATOR_LOCK_ROOT")
+    or Path.home() / ".emulator-locks"
+)
 IDLE_TTL = int(os.environ.get("EMULATOR_LOCK_IDLE_TTL", "14400"))  # 4h, matches emulock
 ABSENT_GRACE = 600  # 10 min boot grace, matches emulock
 POLL_CACHE_SECONDS = 1.5
@@ -100,6 +108,17 @@ def _parse_meta(path: Path) -> dict[str, str]:
     except OSError:
         pass
     return meta
+
+
+def _abbrev_home(path) -> str:
+    """Render a path under $HOME as ~/... so the page is safe to screenshot."""
+    text = str(path)
+    home = str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home + os.sep):
+        return "~" + text[len(home):]
+    return text
 
 
 def _short_owner(owner_id: str) -> str:
@@ -280,8 +299,13 @@ def snapshot() -> dict:
     busy = set(avd_locks)
     return {
         "generated_at": now,
-        "lock_root": str(LOCK_ROOT),
+        # Abbreviated, and the session id shortened the way owners already are
+        # on the cards. This page gets screenshotted and screenshared; neither
+        # the operator's home directory nor a full session uuid tells a reader
+        # anything useful, and both are theirs to keep.
+        "lock_root": _abbrev_home(LOCK_ROOT),
         "me": me,
+        "me_short": _short_owner(me),
         "idle_ttl": IDLE_TTL,
         "devices": rows,
         "unmanaged": unmanaged,
@@ -415,7 +439,7 @@ async function tick() {
       `${s.devices.length} reserved · ${s.unmanaged.length} unlocked · updated ` +
       new Date(s.generated_at * 1000).toLocaleTimeString();
     document.getElementById('root').textContent =
-      s.lock_root + (s.me ? '  ·  this session: ' + s.me : '');
+      s.lock_root + (s.me_short ? '  ·  this session: ' + s.me_short : '');
     document.getElementById('devices').innerHTML =
       s.devices.length ? s.devices.map(deviceCard).join('')
                        : '<div class="empty">No devices reserved.</div>';
