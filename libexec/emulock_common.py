@@ -7,6 +7,7 @@ copy is cheaper than a bash <-> python bridge, and tests/run.sh pins both.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -61,7 +62,8 @@ def project_root(start: Path | None = None) -> Path:
 
 
 class Config:
-    """<repo>/.emulock/config: `key = value` lines, `#` comments, first match wins.
+    """<repo>/.emulock/config: `key = value` lines, first match wins. `#` starts a
+    comment at the start of a line or after whitespace (so `a#b` stays a value).
 
     EMULOCK_<KEY> in the environment overrides a key (dots and dashes become
     underscores, letters upper-case: pool.avd -> EMULOCK_POOL_AVD).
@@ -79,7 +81,9 @@ class Config:
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
-                key, value = (part.strip() for part in line.split("=", 1))
+                key, value = line.split("=", 1)
+                # "key = value   # note": a # after whitespace starts a comment.
+                key, value = key.strip(), re.sub(r"\s+#.*$", "", value).strip()
                 self.values.setdefault(key, value)
 
     @staticmethod

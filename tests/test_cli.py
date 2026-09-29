@@ -71,14 +71,20 @@ class CliTest(unittest.TestCase):
         self.config("""\
             # comment
               pool.avd =  spaced_pool   
-            pool.build = ./gradlew :app:assembleDebug -Pa=b
+            pool.build = ./gradlew :app:assembleDebug -Pa=b   # trailing note
+            pool.ref = origin/main#not-a-comment
+            pool.apk = app/build/app.apk
             pool.avd = second_wins_not
             """)
         cfg = common.Config(self.repo)
         self.assertEqual("spaced_pool", cfg.get("pool.avd"))
         self.assertEqual("./gradlew :app:assembleDebug -Pa=b", cfg.get("pool.build"))
+        self.assertEqual("origin/main#not-a-comment", cfg.get("pool.ref"))
         out = self.run_cli("pool", "status")
         self.assertIn("no AVD spaced_pool yet", out.stdout)
+        out = self.run_cli("pool", "rebake", "--dry-run")
+        self.assertIn("run: ./gradlew :app:assembleDebug -Pa=b\n", out.stdout)
+        self.assertIn("fetch origin/main#not-a-comment", out.stdout)
         # The environment beats the file, in both.
         self.assertIn("no AVD env_pool yet", self.run_cli("pool", "status", EMULOCK_POOL_AVD="env_pool").stdout)
         os.environ["EMULOCK_POOL_AVD"] = "env_pool"

@@ -81,6 +81,7 @@ conf_get() { # conf_get <key> [default] — same rules as bin/emulock
       line == "" || line ~ /^#/ { next }
       { i = index(line, "="); if (!i) next
         name = substr(line, 1, i - 1); v = substr(line, i + 1)
+        sub(/[ \t]+#.*$/, "", v)
         gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", v)
         if (name == k) { print v; exit } }' "$file")"
   fi
