@@ -10,6 +10,8 @@
 #   deny  adb -s emulator-XXXX ...            unless this session owns the lock
 #   deny  device-targeting adb without -s     bare `adb shell`, `adb install`, ...
 #   deny  emulator @AVD launches              without the -port of a lock we own
+#   deny  pool boots with a window or -gpu    the emulator deletes the shared golden snapshot
+#   deny  gradlew install*/uninstall*/connected*  unless ANDROID_SERIAL names a lock we own
 #   deny  direct writes to the lock store     only `emulock` may manage it
 #   allow everything else — by staying silent (exit 0, no output), which defers
 #         to the harness's normal permission flow exactly as if this hook had
@@ -40,6 +42,10 @@ set -uo pipefail
 
 JQ="$(command -v jq || echo /usr/bin/jq)"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
+AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+# The guard reads no project config (it runs before every command and must stay
+# cheap); a pool AVD is recognised by the marker `emulock pool bake` leaves in it.
+POOL_AVD_ENV="${EMULOCK_POOL_AVD:-${EMULATOR_POOL_AVD:-}}"
 
 INPUT="$(cat)"
 CMD="$("$JQ" -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null)" || exit 0
@@ -256,7 +262,22 @@ availability_hint() {
   fi
 }
 
-CLAIM_HINT="Claim a device first: emulock claim. Check owners with: emulock status"
+CLAIM_HINT="Claim a device first: emulock claim --pool (or emulock claim). Check owners with: emulock status"
+
+# require_owned <emulator-serial>: deny unless this session holds its lock,
+# otherwise refresh the lease. An owner-less lock predates the hook and gets a
+# grace lease until it ages out.
+require_owned() {
+  local serial="$1" owner
+  if [[ ! -d "$LOCK_ROOT/$serial" ]]; then
+    deny "$serial is not claimed by anyone — you may not use an unclaimed device. $(availability_hint)"
+  fi
+  owner="$(lock_owner "$serial")"
+  if [[ -n "$owner" && "$owner" != "$ME" ]]; then
+    deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't claim. $(availability_hint)"
+  fi
+  touch_lease "$serial"
+}
 
 [[ -z "$CMD" ]] && allow
 
@@ -297,16 +318,52 @@ if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])adb[[:space:]]+kill-server'; the
 fi
 
 # --- lock-store tampering: only emulock manages ~/.emulator-locks ---
-if echo "$SCMD" | grep -q '\.emulator-locks' && [[ "$CMD" != *emulock* ]]; then
+if echo "$SCMD" | grep -q '\.emulator-locks' && ! [[ "$SCMD" =~ ^[[:space:]]*([^[:space:]]*/)?emulock[[:space:]] ]]; then
   if echo "$SCMD" | grep -qE '(^|[[:space:];&|(])(rm|mv|touch|mkdir|cp)[[:space:]]'; then
     deny "Do not modify ~/.emulator-locks directly — use emulock (claim/release/reap)."
   fi
 fi
 
+# --- pool boots are headless only. `golden` is saved by a headless boot with
+# the default GPU, and a snapshot only loads under the renderer it was saved
+# with. Load it with a window or a -gpu flag and the emulator logs "different
+# renderer configured", DELETES the shared snapshot and exits
+# (-force-snapshot-load does not stop it), so `claim --pool` breaks for every
+# agent until a rebake. Only a boot that loads a snapshot (-read-only or
+# -snapshot) is held to this: the bake's own cold boot has neither. The flags
+# are read from the pool boot's own segment, comments removed, and this runs
+# before the emulock allow below so a boot chained after a claim is still
+# checked. ---
+join_continuations() { awk '{ if (sub(/\\$/, "")) printf "%s ", $0; else print }'; }
+has_flag() { # has_flag <text> <flag regex>: the flag as a whole word (-x, --x, -x=v)
+  printf '%s\n' "$1" | grep -qE -- "(^|[[:space:]])$2([[:space:]=)]|\$)"
+}
+is_pool_avd() { # is_pool_avd <avd>: named by env, or marked by `emulock pool bake`
+  [[ -n "$1" ]] || return 1
+  [[ "$1" == "$POOL_AVD_ENV" || -f "$AVD_HOME/$1.avd/emulock-pool" || -f "$AVD_HOME/$1.avd/golden.json" ]]
+}
+boots="$(printf '%s\n' "$SCMD" | sed -E 's/(^|[[:space:]])#.*$//' | join_continuations \
+  | sed -E 's/[0-9]*>&[0-9-]*//g; s/&>>?//g' | tr ';|&' '\n\n\n' \
+  | grep -E -- '(^|[/[:space:](])emulator[[:space:]].*(@|-avd[[:space:]]+)[A-Za-z0-9_.-]+' || true)"
+while IFS= read -r boot; do
+  [[ -n "$boot" ]] || continue
+  boot_avd="$(printf '%s\n' "$boot" | grep -oE '@[A-Za-z0-9_.-]+' | head -n1 | tr -d '@')"
+  [[ -z "$boot_avd" ]] && boot_avd="$(printf '%s\n' "$boot" | grep -oE -- '-avd[[:space:]]+[A-Za-z0-9_.-]+' | awk '{print $2}' | head -n1)"
+  is_pool_avd "$boot_avd" || continue
+  has_flag "$boot" '--?(read-only|snapshot)' || continue
+  if ! has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
+    deny "Pool instances are headless only. '$boot_avd' boots from a snapshot saved headless with the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emulock claim --pool verbatim. If someone must see or type on the device, release the pool claim and claim a named AVD instead, which boots with a window: emulock claim --avd <name>."
+  fi
+done <<<"$boots"
+
 # --- emulock itself: always allowed. Nothing to spoof-check here —
 # nothing rewrites this command on its way here, so EMULATOR_LOCK_OWNER (if set
 # at all) comes from this session's own environment. ---
-if [[ "$CMD" == *emulock* ]]; then
+# Only a command that IS one emulock call: `*emulock*` let anything through
+# that merely mentioned the word, such as `cd ~/src/emulock && adb -s <theirs> ...`.
+# Anything chained falls through to the checks below, which an emulock call passes.
+RE_EMULOCK_ONLY='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*([^[:space:];&|]*/)?emulock([[:space:]][^;&|]*)?$'
+if [[ "$SCMD" =~ $RE_EMULOCK_ONLY ]]; then
   allow
 fi
 
@@ -314,18 +371,7 @@ fi
 if (( has_adb )); then
   serials="$(echo "$SCMD" | grep -oE -- '(-s|--serial)[[:space:]=]+emulator-[0-9]+' | grep -oE 'emulator-[0-9]+' | sort -u)"
   for serial in $serials; do
-    if [[ ! -d "$LOCK_ROOT/$serial" ]]; then
-      deny "$serial is not claimed by anyone — you may not use an unclaimed device. $(availability_hint)"
-    fi
-    owner="$(lock_owner "$serial")"
-    if [[ -z "$owner" ]]; then
-      touch_lease "$serial"   # legacy pre-hook lock: grace until it ages out
-      continue
-    fi
-    if [[ "$owner" != "$ME" ]]; then
-      deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't claim. $(availability_hint)"
-    fi
-    touch_lease "$serial"
+    require_owned "$serial"
   done
 
   # --- device-targeting adb without any -s: ambiguous and dangerous ---
@@ -334,6 +380,30 @@ if (( has_adb )); then
       deny "Bare device-targeting adb is forbidden — always target your claimed serial explicitly: adb -s <your-serial> ... $(availability_hint)"
     fi
   fi
+fi
+
+# --- Gradle device tasks: install*/uninstall*/connected* do their own device
+# discovery and act on EVERY connected device ("Installed on 2 devices" -- one
+# of them another session's). AGP narrows them to specific devices only via
+# ANDROID_SERIAL (comma-separated), so require it inline and hold each emulator
+# serial to the -s rule above. The serial is read from the raw command because
+# a quoted value is stripped from SCMD; a $VAR value can't be checked here, so
+# it must be spelled out. Task names are matched only in the gradle command's
+# own segment, so `./gradlew tasks | grep installDebug` stays allowed. ---
+gradle_segments="$(echo "$SCMD" | tr ';|&' '\n\n\n' | grep -E '(^|[/[:space:](])gradlew?([[:space:]]|$)' || true)"
+if [[ -n "$gradle_segments" ]] \
+  && echo "$gradle_segments" | grep -qE '(^|[[:space:]:])((un)?install|connected)[A-Z][A-Za-z]*'; then
+  gradle_serials="$(echo "$CMD" | grep -oE "ANDROID_SERIAL=[\"']?[^[:space:]\"';&|]+" \
+    | sed -E "s/^ANDROID_SERIAL=[\"']?//" | tr ',' '\n' | sort -u)"
+  if [[ -z "$gradle_serials" ]]; then
+    deny "Gradle install/uninstall/connected* tasks run on EVERY connected device, including other agents' emulators. Target your claimed serial: ANDROID_SERIAL=<your-serial> ./gradlew <task>, or ./gradlew assemble<Variant> then adb -s <your-serial> install -r <apk>. $CLAIM_HINT"
+  fi
+  for serial in $gradle_serials; do
+    case "$serial" in
+      \$*) deny "Spell ANDROID_SERIAL out literally (ANDROID_SERIAL=emulator-NNNN) — a \$variable can't be checked against your claim. $CLAIM_HINT" ;;
+      emulator-*) require_owned "$serial" ;;
+    esac
+  done
 fi
 
 # --- emulator launches: must use the -port of a lock this session owns ---
