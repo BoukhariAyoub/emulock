@@ -15,7 +15,8 @@ captures what they would want to see, while the agent works:
   render fills the uploaded files' URLs into summary.md, ready to post
 
 Everything lands in <checkout>/.evidence/<timestamp>-<serial>/ (config: evidence.dir;
-keep it gitignored). Posting is up to you: upload each file listed in manifest.json
+keep it gitignored). The checkout is the current directory's, or `start --worktree`;
+later commands find the recording by serial, wherever they run from. Posting is up to you: upload each file listed in manifest.json
 wherever reviewers look (a ticket, the PR), then `render` the summary with their URLs.
 
 Like the doctor, this runs adb itself, which the guard hook cannot see, so it
@@ -37,11 +38,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import emulock_common as common  # noqa: E402
 
-REPO_ROOT = common.project_root()
-CONFIG = common.Config(REPO_ROOT)
-EVIDENCE_ROOT = Path(os.environ.get("EMULOCK_EVIDENCE_DIR")
-                     or os.environ.get("DEVICE_EVIDENCE_DIR")
-                     or REPO_ROOT / CONFIG.get("evidence.dir", ".evidence"))
+REPO_ROOT = Path.cwd()
+CONFIG = common.Config(REPO_ROOT, values={})
+EVIDENCE_ROOT = REPO_ROOT / ".evidence"
+
+
+def use_worktree(root: Path) -> None:
+    """Everything a recording reads from its checkout: config, git, the evidence folder."""
+    global REPO_ROOT, CONFIG, EVIDENCE_ROOT
+    REPO_ROOT = common.project_root(root).resolve()
+    CONFIG = common.Config(REPO_ROOT)
+    EVIDENCE_ROOT = Path(os.environ.get("EMULOCK_EVIDENCE_DIR")
+                         or os.environ.get("DEVICE_EVIDENCE_DIR")
+                         or REPO_ROOT / CONFIG.get("evidence.dir", ".evidence"))
 # Tests swap in a fake doctor script; normally the doctor runs in-process.
 DOCTOR = os.environ.get("EMULOCK_EVIDENCE_DOCTOR") or os.environ.get("DEVICE_EVIDENCE_DOCTOR")
 DEVICE_DIR = "/sdcard/evidence"
@@ -98,14 +107,20 @@ def git(*args: str) -> str:
 
 
 def pointer(serial: str) -> Path:
-    return EVIDENCE_ROOT / f".active-{serial}"
+    # Keyed by serial, not by checkout: a shell whose cwd moved still finds the recording.
+    return common.LOCK_ROOT / ".evidence" / serial
 
 
 def active(serial: str) -> Path:
     path = pointer(serial)
     if not path.is_file():
         die(f"nothing is being recorded on {serial} — start with: emulock evidence start {serial}")
-    return Path(path.read_text().strip())
+    folder = Path(path.read_text().strip())
+    try:
+        use_worktree(Path(json.loads((folder / "session.json").read_text())["worktree"]))
+    except (OSError, KeyError, ValueError):
+        pass
+    return folder
 
 
 def slug(text: str) -> str:
@@ -154,7 +169,7 @@ def start(serial: str, label: str, package: str, variant: str, video: bool) -> N
     (folder / "doctor-start.json").write_text(json.dumps(report, indent=2))
     session = {
         "serial": serial, "label": label, "package": package, "variant": variant, "video": video,
-        "started_at": now(),
+        "started_at": now(), "worktree": str(REPO_ROOT),
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"), "commit": git("rev-parse", "--short", "HEAD"),
         "avd": report.get("avd", ""), "api": report.get("api", ""),
     }
@@ -166,6 +181,7 @@ def start(serial: str, label: str, package: str, variant: str, video: bool) -> N
                 f"screenrecord --bit-rate {BIT_RATE} --time-limit {PART_SECONDS} {DEVICE_DIR}/part-$i.mp4; "
                 f"i=$((i+1)); done")
         adb(serial, "shell", f"nohup sh -c '{loop}' >/dev/null 2>&1 &")
+    pointer(serial).parent.mkdir(parents=True, exist_ok=True)
     pointer(serial).write_text(str(folder))
     for issue in problems(report):
         print(f"pre-flight {issue['status']}: {issue['name']} — {issue['detail']}")
@@ -308,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--variant", default="", help="a variant from .emulock/config (package.<variant>)")
     p.add_argument("--package", default="", help="app id, instead of the configured one")
     p.add_argument("--no-video", action="store_true", help="screenshots, notes and logs only")
+    p.add_argument("--worktree", type=Path, default=None,
+                   help="the checkout under test (default: the current directory's)")
     p = sub.add_parser("shot", help="save a labelled screenshot")
     p.add_argument("serial")
     p.add_argument("label")
@@ -322,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "start":
+        use_worktree(args.worktree or Path.cwd())
         package = args.package or CONFIG.for_variant("package", args.variant or None)
         start(args.serial, args.label, package, args.variant, video=not args.no_video)
     elif args.command == "shot":

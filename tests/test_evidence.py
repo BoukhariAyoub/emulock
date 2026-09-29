@@ -107,7 +107,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn(f"-s {SERIAL} logcat -c", calls)
         self.assertIn("screenrecord --bit-rate 1500000 --time-limit 180", calls)
         self.assertIn("[ $i -le 10 ]", calls)
-        self.assertTrue((self.evidence / f".active-{SERIAL}").exists())
+        self.assertTrue((self.locks / ".evidence" / SERIAL).exists())
 
     def test_a_second_start_on_the_same_device_is_refused(self):
         self.run_script("start", SERIAL)
@@ -135,7 +135,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("[part-1.mp4]({{asset:part-1.mp4}}) · [part-2.mp4]({{asset:part-2.mp4}})", summary)
         self.assertIn("**Crashes during the session:** none", summary)
         self.assertIn("warn · locale", summary)
-        self.assertFalse((self.evidence / f".active-{SERIAL}").exists())
+        self.assertFalse((self.locks / ".evidence" / SERIAL).exists())
 
     def test_crashes_during_the_session_are_flagged(self):
         folder = self.record_session(FAKE_CRASH="E AndroidRuntime: FATAL EXCEPTION: main\nE AndroidRuntime: boom")
@@ -156,6 +156,17 @@ class EvidenceTest(unittest.TestCase):
         folder = self.folder()
         session = json.loads((folder / "session.json").read_text())
         self.assertEqual(("com.example.beta", "beta"), (session["package"], session["variant"]))
+
+    def test_a_recording_is_found_by_serial_from_any_directory(self):
+        self.run_script("start", SERIAL, "--worktree", str(self.tmp), "--no-video")
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        out = subprocess.run([str(EMULOCK), "evidence", "note", SERIAL, "from another cwd"], cwd=elsewhere,
+                             capture_output=True, text=True, env=self.env)
+        self.assertEqual(0, out.returncode, out.stderr)
+        self.assertIn("from another cwd", (self.folder() / "notes.jsonl").read_text())
+        session = json.loads((self.folder() / "session.json").read_text())
+        self.assertEqual(str(self.tmp.resolve()), session["worktree"])
 
     def test_render_fills_in_uploaded_urls(self):
         folder = self.record_session()
