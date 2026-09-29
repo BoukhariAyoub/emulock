@@ -280,7 +280,7 @@ require_owned() {
   fi
   owner="$(lock_owner "$serial")"
   if [[ -n "$owner" && "$owner" != "$ME" ]]; then
-    deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't claim. $(availability_hint)"
+    deny "$serial belongs to another agent (branch: $(lock_branch "$serial")). Never touch a device you didn't check in to. $(availability_hint)"
   fi
   touch_lease "$serial"
 }

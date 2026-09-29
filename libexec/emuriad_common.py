@@ -45,7 +45,7 @@ def claim_problem(serial: str) -> str | None:
         return f"{serial} is not claimed — emuriad check-in --pool (or emuriad check-in)"
     owner = meta.get("OWNER_ID", "")
     if owner and owner != me():
-        return f"{serial} belongs to another agent (branch {meta.get('OWNER_BRANCH', '?')}) — never touch a device you did not claim"
+        return f"{serial} belongs to another agent (branch {meta.get('OWNER_BRANCH', '?')}) — never touch a device you did not check in to"
     return None
 
 

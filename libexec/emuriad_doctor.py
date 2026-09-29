@@ -136,7 +136,7 @@ def check_lock(device: Device) -> Check:
         raise Stop(Check(
             "lock", FAIL,
             f"{device.serial} belongs to another agent (branch {meta.get('OWNER_BRANCH', '?')})",
-            fix=f"{claim} — never touch a device you did not claim",
+            fix=f"{claim} — never touch a device you did not check in to",
         ))
     if not owner:
         return Check("lock", WARN, "legacy lock with no owner — reclaim it so the guard can protect it", fix=claim)
