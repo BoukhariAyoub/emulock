@@ -1,6 +1,6 @@
 ---
 name: emulock
-description: Reserve an Android emulator before using it, on a machine where several agents run at once. Use whenever a task needs a device - installing an APK, launching the app, running Maestro or instrumented tests, reading logcat, taking a screenshot, driving the UI - and whenever a device command is refused, a device dies mid-task, or you need to know who holds what. Triggers on adb, emulator, AVD, "claim a device", "the emulator", "device is busy", "blocked", "not claimed by anyone".
+description: Reserve an Android emulator before using it, on a machine where several agents run at once. Use whenever a task needs a device - installing an APK, launching the app, running Maestro or instrumented tests, reading logcat, taking a screenshot, driving the UI, checking a device is ready, recording proof of an on-device test - and whenever a device command is refused, a device dies mid-task, or you need to know who holds what. Triggers on adb, emulator, AVD, "claim a device", "the emulator", "device pool", "device is busy", "blocked", "not claimed by anyone", "doctor", "evidence".
 ---
 
 # emulock
@@ -14,16 +14,35 @@ refused command in a different shape will not help.
 
 ## The protocol
 
-**1. Claim before you touch anything.**
+**1. Claim before you touch anything.** Prefer the pool:
 
 ```bash
-emulock claim
+emulock claim --pool --note "<what you are doing>"
 ```
 
-It prints the serial you now own. `--avd <name>` reserves a specific AVD;
-`--note "<what you are doing>"` records your intent so a human watching the
-dashboard can see why the device is busy. Pass the note — it costs nothing and it
-is the only human-readable signal of what a held device is for.
+A pool instance is a disposable copy of a prepared device, booted from a `golden`
+snapshot: settings already fixed, nothing another agent did survives in it. The
+claim prints a boot command — run it **verbatim** as a long-lived background
+process, then `adb -s <serial> wait-for-device`. Never drop `-no-window` or add a
+`-gpu` flag: the snapshot only loads headless, and a boot that cannot load it makes
+the emulator delete it for everyone (the guard refuses that boot).
+
+`emulock claim` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
+specific one — use those when the user asks for a device they can watch or touch.
+`--additional` gets a second device for a two-device test. The `--note` records your
+intent so a human can see why the device is busy; pass it.
+
+**Then check the device** before spending time on it:
+
+```bash
+emulock doctor <serial>            # --fix applies the safe settings fixes
+```
+
+It checks the claim, the boot, the installed build (is it *this* checkout's?),
+DNS, locale, permission dialogs or the keyboard covering the screen, and host
+load, plus any checks the project adds. Run it again whenever a result looks
+impossible. Pass `--worktree <path>` if your shell's working directory is not the
+checkout you built.
 
 **2. Target that serial explicitly, every time.**
 
@@ -35,13 +54,31 @@ Never bare `adb shell`, `adb install`, or `adb logcat`. With several devices
 attached, an untargeted command silently picks one — possibly someone else's. It is
 refused for that reason.
 
-**3. Release when the task is done.**
+Gradle's `install*`, `uninstall*` and `connected*` tasks act on **every** connected
+device, so they are refused unless you name your serial inline:
+`ANDROID_SERIAL=emulator-5556 ./gradlew installDebug` (spelled out, not a `$VAR`).
+
+**3. Record what you verified, if a reviewer will ask.**
+
+```bash
+emulock evidence start <serial> --label "<ticket> <what>"   # after installing your build
+emulock evidence shot  <serial> "<what the screen shows>"
+emulock evidence note  <serial> "<what you did or checked>"
+emulock evidence stop  <serial>      # writes summary.md + manifest.json
+```
+
+It records the screen, screenshots, crashes and the doctor's report into the
+project's evidence folder. Upload the files in `manifest.json` where reviewers look,
+then `emulock evidence render <folder> --assets <urls.json>` for the summary.
+
+**4. Release when the task is done.**
 
 ```bash
 emulock release emulator-5556
 ```
 
-Leave the emulator running. The pool stays warm and the next session boots nothing.
+A pool instance is shut down on release, so nothing you changed reaches the next
+agent. An ordinary AVD is left running, warm for the next session.
 
 ## When something goes wrong
 
@@ -59,6 +96,9 @@ Never re-run a remembered `emulator -port 5554` command. The serial is assigned 
 boot; that port may now be a different AVD entirely. `reclaim` re-reserves the AVD
 you were actually using.
 
+`reclaim` of a pool instance just boots a fresh one: any instance is as good as
+another.
+
 **Nothing is free.** Report that to the user. Do not release, reap, or kill a device
 another session holds in order to take it.
 
@@ -68,12 +108,12 @@ another session holds in order to take it.
 emulock doctor
 ```
 
-It reports whether enforcement is actually wired up and prints the exact fix. It
-changes nothing.
+With no serial it reports whether emulock itself is installed and enforcement is
+actually wired up, and prints the fix. It changes nothing.
 
 **Never install or edit the hook yourself.** If `doctor` says the guard is not wired
-in, tell the user and show them the block it printed — do not add it, and do not
-edit `settings.json` or anything under `hooks/`. That file is what constrains which
+in, tell the user to run `emulock init` themselves — do not run it, and do not edit
+`settings.json` or anything under `hooks/`. That file is what constrains which
 commands you may run; a hook you can install is a hook you can remove, which would
 make the whole mechanism pointless. Your harness will refuse the edit anyway.
 
@@ -83,6 +123,8 @@ make the whole mechanism pointless. Your harness will refuse the edit anyway.
   just yours. It is always refused.
 - **Never** `emu kill`, `pm clear`, `install`, `uninstall`, or reboot a serial you
   do not own.
+- **Never** bake or rebake the pool (`emulock pool bake|rebake`) unless the user
+  asks: it shuts every pool instance out while it runs.
 - **Never** edit the lock store by hand. `emulock reap` is the only sanctioned
   cleanup, and it removes only provably dead locks.
 - **Never** work around a refusal by wrapping the command in `bash -c`, a script, or

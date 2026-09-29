@@ -103,6 +103,9 @@ The failures above stop being possible:
 | `adb kill-server` | always refused, for everyone |
 | Bare `adb shell` picking a device at random | refused; you must name your own serial |
 | Booting the wrong AVD on a recycled port | a launch must use the port *and* AVD you reserved |
+| `./gradlew installDebug` hitting every connected device | refused unless `ANDROID_SERIAL` names your own device |
+| A device still carrying the last agent's state | pool instances start from a snapshot and are shut down on release |
+| Testing the wrong build | `emulock doctor` checks the installed APK is your checkout's |
 | Locks outliving the session | leases expire after 4h idle and are reclaimable |
 | Not knowing who holds what | `emulock status`, or a live dashboard |
 
@@ -126,99 +129,143 @@ Android only, deliberately. Android emulators are heavyweight VMs bound to a por
 you run a handful before the machine gives out, and two sessions booting the same AVD
 corrupt the image. That scarcity is what makes locking worth enforcing.
 
-**No dependencies.** Bash, python3, and the platform-tools you already have.
+**No daemon, no database.** Bash, python3, `jq`, and the platform-tools you already have.
 
 ## Install
 
 Requires `bash`, `jq`, `python3`, and the Android SDK platform-tools. macOS and Linux.
 
-> **`jq` is not optional.** The guard parses the harness payload with it, and a hook
-> that cannot parse its input exits 0 — which means *allow*. Without `jq`, `claim` and
-> `status` still work and **nothing is enforced, silently.** It can't fail closed
-> instead: a hook that denied on its own breakage would block every shell command on
-> the machine with no way to repair it. `/usr/bin/jq` ships only on macOS 15+, so on
-> older macOS run `brew install jq`. `emulock doctor` checks for it.
-
 ```bash
-git clone https://github.com/BoukhariAyoub/emulock.git
-cd emulock
-./install.sh
+brew install boukhariayoub/emulock/emulock
+emulock init
 ```
 
-`install.sh` symlinks `emulock` and `emulock-lab` into `~/.local/bin` and prints the
-hook block to paste into your agent's settings. It changes nothing else, and prints
-every action before taking it.
+`init` does two things, and shows each change before making it:
 
-Then wire the guard into Claude Code by adding this to `.claude/settings.json` in each
-repo where you want it enforced — committing it means every contributor gets it with no
-install step of their own:
+1. links the **skill** into `~/.claude/skills/emulock`, so agents learn the protocol
+   up front instead of by being refused;
+2. adds the **guard** to `~/.claude/settings.json` as a `PreToolUse` hook, so every
+   project on the machine is covered. It asks first, and without a terminal it prints
+   the change and stops: a hook decides which commands an agent may run, so wiring it
+   is a step for a person, not for an agent.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "~/.local/share/emulock/hooks/claude-code/emulock-guard.sh" }]
-      }
-    ]
-  }
-}
-```
+For a team, `emulock init --project` writes the hook and a copy of the skill into the
+repo's `.claude/` instead; commit them and every contributor who has emulock
+installed is covered. Nothing else is needed per project.
+
+Without Homebrew: `git clone https://github.com/BoukhariAyoub/emulock.git && cd emulock && ./install.sh`,
+then `emulock init`.
 
 Verify:
 
 ```bash
-emulock doctor          # is enforcement actually wired up?
-./tests/run.sh          # 56 tests, no dependencies
+emulock doctor          # is emulock installed, and is enforcement actually wired up?
+./tests/run.sh          # the suite, no dependencies
 ```
 
-`doctor` is read-only. It checks dependencies, the lock store, your session identity,
-and whether the hook is wired into a `settings.json` above the current directory —
-printing the exact block to paste if it is not.
-
-**Neither `install.sh` nor the skill will wire the hook for you, by design.** A
-`PreToolUse` hook decides which commands an agent may run; a hook an agent can install
-is a hook an agent can uninstall, and self-installing enforcement is not enforcement.
-Agent harnesses already refuse to edit hook files as self-modification — correctly. So
-the human wires it once, and `doctor` exists so an agent can *check and report* instead
-of guessing or trying to repair it.
-
-### Install the skill
-
-emulock is used by agents, not by hand, so teach them the protocol. Copy the skill into
-the repo where they work:
-
-```bash
-cp -r skills/emulock .claude/skills/
-```
-
-Without it the hook still protects you, but agents learn the rules by being refused —
-they hit a wall, guess, and retry. With it they claim correctly the first time. If your
-harness has no skill mechanism, paste the contents of
-[`skills/emulock/SKILL.md`](skills/emulock/SKILL.md) into your agent instructions file
-instead.
+> **`jq` is not optional.** The guard parses the harness payload with it, and a hook
+> that cannot parse its input exits 0 — which means *allow*. Without `jq`, `claim` and
+> `status` still work and **nothing is enforced, silently.** It can't fail closed
+> instead: a hook that denied on its own breakage would block every shell command on
+> the machine with no way to repair it. Homebrew installs `jq` with emulock;
+> `emulock doctor` checks for it either way.
 
 ## Use
 
 ```bash
-emulock claim                      # reserve a free device
-emulock claim --avd medium_phone   # reserve a specific AVD
+emulock claim --pool               # a disposable, ready-made device (see "The pool")
+emulock claim                      # or reserve an ordinary AVD
+emulock claim --avd medium_phone   # a specific one
 emulock claim --note "checkout flake repro"
+emulock doctor emulator-5556       # is this device ready to test on?
 emulock status                     # who owns what
-emulock reclaim                    # device died — same AVD, new serial
-emulock release emulator-5556      # done (leave it running — warm pool)
+emulock reclaim                    # device died — same AVD (or a fresh pool instance)
+emulock release emulator-5556      # done
 emulock reap                       # clear provably dead locks
 ```
 
 Always target your own serial explicitly — `adb -s <your-serial> …`, never bare
-`adb shell`. Every allowed device command refreshes your lease.
+`adb shell`. Gradle's `install*`/`connected*` tasks need it inline:
+`ANDROID_SERIAL=emulator-5556 ./gradlew installDebug`. Every allowed device command
+refreshes your lease.
 
 ### Identity is the AVD, not the port
 
 `emulator-5554` is the serial that bound port 5554 *this boot*. Next boot it may be a
 different AVD entirely. After a crash use `emulock reclaim`, never a remembered
 `-port 5554` command — that port may now be something else.
+
+### The pool
+
+An ordinary AVD carries whatever the last session left on it. A pool instance does not:
+`emulock claim --pool` boots a read-only copy of one AVD from its `golden` snapshot, so
+every instance starts identical, and releasing it shuts it down so nothing you changed
+reaches the next agent. Booting from the snapshot takes seconds.
+
+```bash
+emulock pool bake                  # build golden once (3–5 min)
+emulock pool rebake                # weekly: bake from a fresh build of main, in a throwaway checkout
+emulock pool status
+```
+
+`bake` fixes the settings that waste agent time on a fresh device — Private DNS off
+(it breaks name resolution on the emulator's network), animations off, screen always
+on, no lock screen, a hardware keyboard so the IME never covers the screen — then
+installs your app and runs your project's setup hook if you have one (below). It only
+saves the snapshot if `emulock doctor` agrees the device is clean.
+
+The pool is **headless only**. A snapshot loads only under the display setup it was
+saved with, and a boot that cannot load it makes the emulator delete it — for every
+agent. The guard refuses a pool boot without `-no-window` or with a `-gpu` flag, and
+`golden` is read-only on disk between bakes. For a device someone can watch or type
+on, claim an ordinary AVD.
+
+### Proof for reviewers
+
+```bash
+emulock evidence start emulator-5556 --label "PROJ-123 cart badge"
+emulock evidence shot  emulator-5556 "cart shows 2 items"
+emulock evidence note  emulator-5556 "tapped Add twice, badge went 1 → 2"
+emulock evidence stop  emulator-5556
+```
+
+A screen recording in 3-minute parts, labelled screenshots, notes, the crash buffer,
+recent warnings, and the doctor's report before and after — including whether the
+installed build is the one in your checkout. `stop` writes `summary.md` and a
+`manifest.json` of files to upload; `render` fills their URLs into the summary. It all
+lands in `.evidence/` in your repo (keep it gitignored; `start` warns if it is not).
+
+## Project config
+
+Nothing is required. A project that wants more adds `.emulock/` at its root:
+
+```
+.emulock/
+  config            key = value settings, below
+  pool-setup.sh     run on the device during `pool bake`: sign-in state, first-run flags, permissions
+  doctor.py         extra checks for `emulock doctor`: def checks(device, ctx) -> [Check]
+```
+
+```ini
+# .emulock/config
+package          = com.example.app.debug       # app the doctor and evidence look at
+package.release  = com.example.app             # variants: `emulock doctor <serial> release`
+apk.glob         = app/build/outputs/apk/*/*/*.apk
+build.command    = ./gradlew :app:assembleDebug
+locale           = en-US                       # "any" to skip the check
+pool.avd         = myapp_pool
+pool.apk         = app/build/outputs/apk/debug/app-debug.apk
+pool.build       = ./gradlew :app:assembleDebug
+pool.verify      = lock boot dns locale notifications on-top
+```
+
+Any key can be overridden from the environment: `pool.avd` is `EMULOCK_POOL_AVD`.
+`emulock pool --help` and `emulock doctor --help` list every key.
+
+`pool-setup.sh` and `doctor.py` are your repo's own code, run only when you run
+`pool bake` or `doctor` in that repo (`--no-project` skips the plugin). The guard never
+reads project files: it runs before every shell command, and a hook that executed a
+repo's scripts would run them in every project you open.
 
 ## emulock-lab
 
@@ -260,7 +307,7 @@ agent's files. Branch comes from git; the verb comes from the command; the note 
 whatever you passed to `claim --note`. A project with none of those conventions still
 gets a useful dashboard.
 
-## Configuration
+## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -269,6 +316,8 @@ gets a useful dashboard.
 | `EMULATOR_LOCK_OWNER` | unset | override session identity (for other harnesses) |
 | `EMULATOR_LOCK_TICKET_RE` | unset | regex whose first group is a ticket id in the branch name; unset shows no ticket |
 | `ANDROID_HOME` / `ANDROID_SDK_ROOT` | probed | SDK root |
+| `ANDROID_AVD_HOME` | `~/.android/avd` | AVD directory |
+| `EMULOCK_<KEY>` | unset | overrides a `.emulock/config` key (see Project config) |
 
 ## Harness support
 
@@ -290,11 +339,11 @@ anti-accident, not anti-adversarial.**
 
 ```bash
 ./tests/run.sh          # all
-./tests/run.sh guard    # one group: shells | guard | state | lock
+./tests/run.sh guard    # one group: shells | guard | state | lock | py
 ```
 
-56 tests, no dependencies, run against a scratch lock store — safe to run while agents
-hold live devices.
+No dependencies beyond python3, run against a scratch lock store, AVD home and HOME —
+safe to run while agents hold live devices.
 
 The guard is a `PreToolUse` hook on *every* shell command, so a syntax error in it does
 not merely break adb: it blocks all shell access for every session on the machine, and
