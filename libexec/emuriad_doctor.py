@@ -7,7 +7,7 @@ opportunistic Private DNS killing name resolution on the emulator's NAT, a
 locale that fails English assertions, a permission dialog or the keyboard
 swallowing taps a UI driver reports as successful, and a loaded host turning a
 43 ms call into ~4 s. Each is usually found only after the time is gone. This
-runs every check in one pass, right after `emuriad claim`.
+runs every check in one pass, right after `emuriad check-in`.
 
 Read-only by default. `--fix` applies only safe, reversible device settings
 (Private DNS off on emulators, grant POST_NOTIFICATIONS, approve App Link
@@ -128,7 +128,7 @@ def check_lock(device: Device) -> Check:
     if not device.is_emulator:
         return Check("lock", SKIP, "physical device — not in the emulator lock store")
     meta = common.read_meta(device.serial)
-    claim = "emuriad claim --pool (or emuriad claim)"
+    claim = "emuriad check-in --pool (or emuriad check-in)"
     if meta is None:
         raise Stop(Check("lock", FAIL, f"{device.serial} is not claimed by anyone", fix=claim))
     owner = meta.get("OWNER_ID", "")
@@ -172,7 +172,7 @@ def check_golden(device: Device, max_age_days: int) -> Check | None:
     if meta.get("POOL") != "1":
         return None
     avd_dir = common.AVD_HOME / f"{meta.get('AVD', '')}.avd"
-    name = meta.get("POOL_SNAPSHOT") or "golden"   # golden-window for claim --pool --window
+    name = meta.get("POOL_SNAPSHOT") or "golden"   # golden-window for check-in --pool --window
     record = avd_dir / f"{name}.json"
     snapshot = avd_dir / "snapshots" / name
     commit = ""

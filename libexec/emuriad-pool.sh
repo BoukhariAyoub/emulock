@@ -2,7 +2,7 @@
 #
 # emuriad pool — build and inspect the agent emulator pool.
 #
-# Agents claim pool instances with `emuriad claim --pool`: read-only copies of
+# Agents claim pool instances with `emuriad check-in --pool`: read-only copies of
 # one AVD, each booted from its `golden` snapshot. This script makes that
 # snapshot. Everything an agent would otherwise fix by hand on a fresh device is
 # already done in it:
@@ -22,7 +22,7 @@
 #   emuriad pool rebake [--dry-run]     bake from a fresh build of pool.ref in a throwaway checkout
 #
 # --window bakes `golden-window` instead of `golden`: the same setup, saved from
-# a boot with a window, for `claim --pool --window` (a device someone can
+# a boot with a window, for `check-in --pool --window` (a device someone can
 # watch). A window opens on the screen while it bakes. rebake refreshes
 # golden-window too once it exists.
 #
@@ -210,7 +210,7 @@ cleanup() { # on any exit before the bake finished: never leave a writable pool 
   adb -s "$SERIAL" emu kill >/dev/null 2>&1 || true
   [[ -n "$EMU_PID" ]] && wait "$EMU_PID" 2>/dev/null || true
   protect_snapshot || true
-  "$LOCK" release "$SERIAL" >/dev/null 2>&1 || true
+  "$LOCK" check-out "$SERIAL" >/dev/null 2>&1 || true
 }
 
 setup_device() {
@@ -292,12 +292,12 @@ cmd_bake() {
   # --additional: `claim --avd` alone hands back a lock this session already holds.
   local claim_out
   if [[ "$DRY_RUN" == 1 ]]; then
-    "$LOCK" --dry-run claim --additional --avd "$POOL_AVD" --note "pool bake"
+    "$LOCK" --dry-run check-in --additional --avd "$POOL_AVD" --note "pool bake"
     say "[dry-run] would cold-boot $( ((WINDOW)) && echo 'with a window' || echo headless), set up the device${APK:+, install $(basename "$APK")}, run $(abs_in "$PROJECT_ROOT" "$SETUP") if present,"
     say "[dry-run] verify ($VERIFY) with emuriad doctor, save '$SNAP', shut down, release"
     return 0
   fi
-  claim_out="$("$LOCK" claim --additional --avd "$POOL_AVD" --note "pool bake")"
+  claim_out="$("$LOCK" check-in --additional --avd "$POOL_AVD" --note "pool bake")"
   SERIAL="$(sed -n 's/^claimed: \(emulator-[0-9]*\).*/\1/p' <<<"$claim_out")"
   [[ -n "$SERIAL" ]] || die "could not read the claimed serial from: $claim_out"
   trap on_exit EXIT
@@ -331,12 +331,12 @@ cmd_bake() {
   dev emu kill >/dev/null 2>&1 || true
   wait "$EMU_PID" 2>/dev/null || true
   protect_snapshot
-  "$LOCK" release "$SERIAL" >/dev/null
+  "$LOCK" check-out "$SERIAL" >/dev/null
   DONE=1
   if (( WINDOW )); then
-    say "done — a watchable device is now: emuriad claim --pool --window"
+    say "done — a watchable device is now: emuriad check-in --pool --window"
   else
-    say "done — agents can now: emuriad claim --pool"
+    say "done — agents can now: emuriad check-in --pool"
   fi
 }
 
@@ -384,8 +384,8 @@ cmd_status() {
   echo "agent pool: AVD $POOL_AVD ($(sed -n 's|^image\.sysdir\.1 *= *system-images/\([^/]*\)/\([^/]*\)/.*|\1 \2|p' "$(avd_dir)/config.ini"))"
   for name in "$POOL_SNAPSHOT" "$POOL_SNAPSHOT_WINDOW"; do
     snap="$(snapshot_dir "$name")"
-    how="headless: emuriad claim --pool"
-    [[ "$name" == "$POOL_SNAPSHOT_WINDOW" ]] && how="with a window: emuriad claim --pool --window"
+    how="headless: emuriad check-in --pool"
+    [[ "$name" == "$POOL_SNAPSHOT_WINDOW" ]] && how="with a window: emuriad check-in --pool --window"
     if [[ -d "$snap" ]]; then
       echo "  snapshot '$name' ($how): $(du -sh "$snap" | cut -f1)"
       [[ -w "$snap" ]] && echo "    writable: a boot that cannot load it deletes it (the next bake makes it read-only)"

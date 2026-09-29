@@ -93,6 +93,18 @@ class CliTest(unittest.TestCase):
         finally:
             del os.environ["EMURIAD_POOL_AVD"]
 
+    def test_hotel_names_and_the_old_names_run_the_same_commands(self):
+        for new, old in (("check-out", "release"), ("extend-stay", "heartbeat")):
+            with self.subTest(command=new):
+                a = self.run_cli(new, "emulator-5599")
+                b = self.run_cli(old, "emulator-5599")
+                self.assertEqual((a.returncode, a.stdout, a.stderr), (b.returncode, b.stdout, b.stderr))
+                self.assertIn(f"{new}: no lock for emulator-5599", a.stdout + a.stderr)
+        a, b = self.run_cli("check-in", "--bogus"), self.run_cli("claim", "--bogus")
+        self.assertEqual((a.returncode, a.stderr), (b.returncode, b.stderr))
+        self.assertIn("check-in: unknown option --bogus", a.stderr)
+        self.assertIn("check-in", self.run_cli("--help").stdout)
+
     # --- guard -----------------------------------------------------------------------
 
     def test_guard_subcommand_is_the_hook(self):
@@ -238,7 +250,7 @@ class CliTest(unittest.TestCase):
         (avd / "snapshots" / "golden-window").mkdir()
         (avd / "golden-window.json").write_text('{"baked_at": "2026-09-29T00:00:00Z", "commit": "abc1234"}')
         out = self.run_cli("pool", "status").stdout
-        self.assertIn("claim --pool --window", out)
+        self.assertIn("check-in --pool --window", out)
         self.assertIn("baked from abc1234", out)
         self.config("pool.apk = app.apk\npool.build = true\n")
         self.assertIn("then golden-window with a window", self.run_cli("pool", "rebake", "--dry-run").stdout)

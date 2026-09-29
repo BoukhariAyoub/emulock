@@ -1,4 +1,4 @@
-"""Tests for `emuriad claim --pool`.
+"""Tests for `emuriad check-in --pool`.
 
 Run: python3 tests/test_pool.py   (no pytest needed; tests/run.sh runs it too)
      python3 -m pytest tests -q            (if pytest is installed)

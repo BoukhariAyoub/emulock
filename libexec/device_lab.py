@@ -387,7 +387,7 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
 <section><h2>Attached without a lock</h2><div id="unmanaged"></div></section>
 <section><h2>Installed AVDs</h2><div class="avds" id="avds"></div></section>
 <footer>Read-only view of <code>emuriad</code> state. Claim with
-<code>emuriad claim</code>, release with <code>emuriad release &lt;serial&gt;</code>.
+<code>emuriad check-in</code>, release with <code>emuriad check-out &lt;serial&gt;</code>.
 Never touch a serial you did not claim.</footer>
 <script>
 const dur = s => {

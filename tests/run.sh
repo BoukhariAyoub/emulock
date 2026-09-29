@@ -200,7 +200,7 @@ except Exception: print("")'
   mk_lock emulator-5599 600
   mk_lock emulator-5601 9240
   hint="$(ask_hint)"
-  has "a busy store still sends you to claim" "$hint" "Claim your own: emuriad claim"
+  has "a busy store still sends you to claim" "$hint" "Check in to your own: emuriad check-in"
   has "...says when a lease frees"             "$hint" "frees in"
   has "...and not to take someone else's"      "$hint" "tell the user rather than taking"
 
@@ -221,7 +221,7 @@ except Exception: print("")'
 
   # Never name a serial: two agents refused at once would race for it.
   case "$hint" in
-    *"emuriad claim emulator-"*|*"claim emulator-5"*)
+    *"emuriad check-in emulator-"*|*"check-in emulator-5"*|*"claim emulator-5"*)
       bad "hint never names a specific serial" "a count, not a serial" "$hint" ;;
     *) ok "hint never names a specific serial" ;;
   esac

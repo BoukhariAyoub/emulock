@@ -1,6 +1,6 @@
 ---
 name: emuriad
-description: Reserve an Android emulator before using it, on a machine where several agents run at once. Use whenever a task needs a device - installing an APK, launching the app, running Maestro or instrumented tests, reading logcat, taking a screenshot, driving the UI, checking a device is ready, recording proof of an on-device test - and whenever a device command is refused, a device dies mid-task, or you need to know who holds what. Triggers on adb, emulator, AVD, "claim a device", "the emulator", "device pool", "device is busy", "blocked", "not claimed by anyone", "doctor", "evidence".
+description: Reserve an Android emulator before using it, on a machine where several agents run at once. Use whenever a task needs a device - installing an APK, launching the app, running Maestro or instrumented tests, reading logcat, taking a screenshot, driving the UI, checking a device is ready, recording proof of an on-device test - and whenever a device command is refused, a device dies mid-task, or you need to know who holds what. Triggers on adb, emulator, AVD, "check in", "check out", "claim a device", "the emulator", "device pool", "device is busy", "blocked", "not claimed by anyone", "doctor", "evidence".
 ---
 
 # emuriad
@@ -14,10 +14,10 @@ refused command in a different shape will not help.
 
 ## The protocol
 
-**1. Claim before you touch anything.** Prefer the pool:
+**1. Check in before you touch anything.** Prefer the pool:
 
 ```bash
-emuriad claim --pool --note "<what you are doing>"
+emuriad check-in --pool --note "<what you are doing>"
 ```
 
 A pool instance is a disposable copy of a prepared device, booted from a `golden`
@@ -27,11 +27,11 @@ process, then `adb -s <serial> wait-for-device`. Never drop `-no-window` or add 
 `-gpu` flag: the snapshot only loads headless, and a boot that cannot load it makes
 the emulator delete it for everyone (the guard refuses that boot).
 
-When the user wants to **watch or touch** the device, claim `emuriad claim --pool --window`
+When the user wants to **watch or touch** the device, claim `emuriad check-in --pool --window`
 instead: the same disposable device, booted in a window from its own `golden-window`
 snapshot (if it says the snapshot is missing, tell the user: baking it is theirs to run,
 `emuriad pool bake --window`). Its boot command has no `-no-window`; run it verbatim too.
-`emuriad claim` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
+`emuriad check-in` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
 specific one.
 `--additional` gets a second device for a two-device test. The `--note` records your
 intent so a human can see why the device is busy; pass it.
@@ -75,20 +75,23 @@ It records the screen, screenshots, crashes and the doctor's report into the
 project's evidence folder. Upload the files in `manifest.json` where reviewers look,
 then `emuriad evidence render <folder> --assets <urls.json>` for the summary.
 
-**4. Release when the task is done.**
+**4. Check out when the task is done.**
 
 ```bash
-emuriad release emulator-5556
+emuriad check-out emulator-5556
 ```
 
-A pool instance is shut down on release, so nothing you changed reaches the next
+A pool instance is shut down on check-out, so nothing you changed reaches the next
 agent. An ordinary AVD is left running, warm for the next session.
+
+`claim`, `release` and `heartbeat` are the older names of `check-in`, `check-out` and
+`extend-stay`; they still work.
 
 ## When something goes wrong
 
 **A command was refused.** Read the message — it names the owner and the branch.
 Either you never claimed, or you are using a serial that belongs to another session.
-Run `emuriad status` to see the truth, then claim your own device.
+Run `emuriad status` to see the truth, then check in to your own device.
 
 **The device died mid-task.**
 
@@ -148,7 +151,7 @@ owner is currently doing — `Running flow · checkout.yaml`, `Installing`,
 
 A lease expires after 4 hours idle. Your own commands refresh it automatically, so a
 device stays yours while you are actually using it. If you hold one through a long
-silent stretch, `emuriad heartbeat <serial>` keeps it.
+silent stretch, `emuriad extend-stay <serial>` keeps it.
 
 ## Identity is the AVD, not the port
 

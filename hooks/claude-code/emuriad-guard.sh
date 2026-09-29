@@ -223,7 +223,7 @@ touch_lease() {
 #
 # It reports a count, never a specific serial. Two agents refused in the same
 # instant would both be pointed at the same device and one would lose a race it
-# had just been promised. `emuriad claim` does the atomic mkdir tie-break.
+# had just been promised. `emuriad check-in` does the atomic mkdir tie-break.
 
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 
@@ -255,20 +255,20 @@ availability_hint() {
   done
 
   # The hook cannot see which emulators are running or which AVDs are free (that
-  # needs adb), so it never decides the machine is full: `emuriad claim` does, and
+  # needs adb), so it never decides the machine is full: `emuriad check-in` does, and
   # says so itself. What the lock store can add is how busy it is.
   if [[ "$held" -eq 0 ]]; then
-    echo "No other session holds a device — claim your own: emuriad claim --pool (or emuriad claim)"
+    echo "No other session holds a device — check in to your own: emuriad check-in --pool (or emuriad check-in)"
   elif [[ "$expired" -gt 0 ]]; then
-    echo "$held held by other sessions, $expired with an expired lease and reclaimable now — claim your own: emuriad claim --pool (or emuriad claim)"
+    echo "$held held by other sessions, $expired with an expired lease and reclaimable now — check in to your own: emuriad check-in --pool (or emuriad check-in)"
   elif [[ -n "$soonest" ]]; then
-    echo "$held held by other sessions; the earliest lease frees in $(human_secs "$soonest"). Claim your own: emuriad claim --pool (or emuriad claim) finds a free one, or says when none is left — then tell the user rather than taking a device that isn't yours."
+    echo "$held held by other sessions; the earliest lease frees in $(human_secs "$soonest"). Check in to your own: emuriad check-in --pool (or emuriad check-in) finds a free one, or says when none is left — then tell the user rather than taking a device that isn't yours."
   else
-    echo "Claim a device first: emuriad claim --pool (or emuriad claim)"
+    echo "Check in to a device first: emuriad check-in --pool (or emuriad check-in)"
   fi
 }
 
-CLAIM_HINT="Claim a device first: emuriad claim --pool (or emuriad claim). Check owners with: emuriad status"
+CLAIM_HINT="Check in to a device first: emuriad check-in --pool (or emuriad check-in). Check owners with: emuriad status"
 
 # require_owned <emulator-serial>: deny unless this session holds its lock,
 # otherwise refresh the lease. An owner-less lock predates the hook and gets a
@@ -334,7 +334,7 @@ fi
 # the default GPU, and a snapshot only loads under the renderer it was saved
 # with. Load it with a window or a -gpu flag and the emulator logs "different
 # renderer configured", DELETES the shared snapshot and exits
-# (-force-snapshot-load does not stop it), so `claim --pool` breaks for every
+# (-force-snapshot-load does not stop it), so `check-in --pool` breaks for every
 # agent until a rebake. Only a boot that loads a snapshot (-read-only or
 # -snapshot) is held to this: the bake's own cold boot has neither. The flags
 # are read from the pool boot's own segment, comments removed, and this runs
@@ -362,10 +362,10 @@ while IFS= read -r boot; do
   if [[ "$boot_snapshot" == "golden-window" ]]; then
     # Saved from a windowed boot: a headless one, or any -gpu, cannot load it.
     if has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
-      deny "'golden-window' was saved from a boot WITH a window and the default GPU; adding -no-window or -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool --window for everyone until a rebake. Run the boot command from emuriad claim --pool --window verbatim, or claim a headless one: emuriad claim --pool."
+      deny "'golden-window' was saved from a boot WITH a window and the default GPU; adding -no-window or -gpu makes the emulator delete that shared snapshot and exit, which breaks check-in --pool --window for everyone until a rebake. Run the boot command from emuriad check-in --pool --window verbatim, or claim a headless one: emuriad check-in --pool."
     fi
   elif ! has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
-    deny "This pool snapshot is headless: '$boot_avd' boots from a snapshot saved with -no-window and the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emuriad claim --pool verbatim. For a device someone can watch, release this claim and use emuriad claim --pool --window (needs emuriad pool bake --window once), or a named AVD: emuriad claim --avd <name>."
+    deny "This pool snapshot is headless: '$boot_avd' boots from a snapshot saved with -no-window and the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks check-in --pool for every agent until a rebake. Run the boot command from emuriad check-in --pool verbatim. For a device someone can watch, release this claim and use emuriad check-in --pool --window (needs emuriad pool bake --window once), or a named AVD: emuriad check-in --avd <name>."
   fi
 done <<<"$boots"
 
@@ -424,7 +424,7 @@ fi
 if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])emulator[[:space:]]+[^;|&]*(@[A-Za-z0-9_.-]+|-avd[[:space:]]+[A-Za-z0-9_.-]+)'; then
   port="$(echo "$SCMD" | grep -oE -- '-port[[:space:]]+[0-9]+' | grep -oE '[0-9]+' | head -n1)"
   if [[ -z "$port" ]]; then
-    deny "Emulator launches must use the -port printed by emuriad claim (a portless launch grabs an arbitrary port and collides with other agents). $CLAIM_HINT"
+    deny "Emulator launches must use the -port printed by emuriad check-in (a portless launch grabs an arbitrary port and collides with other agents). $CLAIM_HINT"
   fi
   serial="emulator-$port"
   if [[ ! -d "$LOCK_ROOT/$serial" ]]; then

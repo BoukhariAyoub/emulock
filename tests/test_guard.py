@@ -24,7 +24,7 @@ ME = f"claude-code:{SESSION}"
 MINE, THEIRS = "emulator-5599", "emulator-5601"
 EMULATOR = "~/Library/Android/sdk/emulator/emulator"
 POOL = "agent_pool"
-# What `emuriad claim --pool` prints, on this session's port.
+# What `emuriad check-in --pool` prints, on this session's port.
 POOL_BOOT = (f"{EMULATOR} @{POOL} -port 5599 -no-boot-anim -read-only -snapshot golden "
              "-force-snapshot-load -no-snapshot-save -no-window")
 # What `emuriad pool bake` runs: a writable cold boot that loads no snapshot.
@@ -71,7 +71,7 @@ class GuardTest(unittest.TestCase):
     def test_a_pool_boot_with_a_window_is_denied(self):
         self.assertEqual("deny", self.decide(POOL_BOOT.replace(" -no-window", "")))
         self.assertIn("snapshot is headless", self.last_reason)
-        self.assertIn("claim --pool --window", self.last_reason)
+        self.assertIn("check-in --pool --window", self.last_reason)
 
     def test_a_pool_boot_with_a_gpu_flag_is_denied(self):
         for gpu in ("-gpu host", "-gpu swiftshader_indirect", "--gpu host", "-gpu=host"):
@@ -92,7 +92,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual("allow", self.decide(BAKE_BOOT))
 
     def test_a_boot_chained_after_a_claim_is_still_checked(self):
-        command = f"emuriad claim --pool && {POOL_BOOT.replace(' -no-window', '')}"
+        command = f"emuriad check-in --pool && {POOL_BOOT.replace(' -no-window', '')}"
         self.assertEqual("deny", self.decide(command))
 
     def test_flags_count_only_in_the_pool_boots_own_segment(self):
@@ -160,8 +160,8 @@ class GuardTest(unittest.TestCase):
 
     def test_only_a_command_that_is_one_emuriad_call_skips_the_checks(self):
         self.assertEqual("allow", self.decide("emuriad status"))
-        self.assertEqual("allow", self.decide("/opt/homebrew/bin/emuriad release emulator-5599"))
-        self.assertEqual("allow", self.decide("EMULATOR_LOCK_OWNER=x emuriad claim --pool"))
+        self.assertEqual("allow", self.decide("/opt/homebrew/bin/emuriad check-out emulator-5599"))
+        self.assertEqual("allow", self.decide("EMULATOR_LOCK_OWNER=x emuriad check-in --pool"))
         # Merely mentioning the word used to let anything through.
         self.assertEqual("deny", self.decide(f"cd ~/src/emuriad && adb -s {THEIRS} shell ls"))
         self.assertEqual("deny", self.decide(f"emuriad status; adb -s {THEIRS} shell ls"))

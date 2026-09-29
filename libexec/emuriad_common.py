@@ -42,7 +42,7 @@ def claim_problem(serial: str) -> str | None:
         return None  # physical devices are not in the lock store
     meta = read_meta(serial)
     if meta is None:
-        return f"{serial} is not claimed — emuriad claim --pool (or emuriad claim)"
+        return f"{serial} is not claimed — emuriad check-in --pool (or emuriad check-in)"
     owner = meta.get("OWNER_ID", "")
     if owner and owner != me():
         return f"{serial} belongs to another agent (branch {meta.get('OWNER_BRANCH', '?')}) — never touch a device you did not claim"

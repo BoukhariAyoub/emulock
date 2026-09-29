@@ -35,12 +35,12 @@ Every device is reserved before use, and **the reservation is enforced by the ha
 not by the agent's good manners**:
 
 ```
-$ emuriad claim
+$ emuriad check-in
 emulator-5556  (AVD: medium_phone)  claimed by claude-code:15db96f9
 
 $ adb -s emulator-5560 shell input tap 100 200
 Blocked: emulator-5560 belongs to another agent (branch: fix/checkout-flake).
-Never touch a device you didn't claim. Claim your own with: emuriad claim
+Never touch a device you didn't check in to. Check in to your own with: emuriad check-in
 ```
 
 That is not a warning the agent can read and ignore. The command never runs.
@@ -49,7 +49,7 @@ That is not a warning the agent can read and ignore. The command never runs.
 
 ```mermaid
 flowchart TB
-    A["Agent A"] -->|"emuriad claim"| LS["<b>lock store</b><br/><code>~/.emulator-locks</code><br/>one dir per device · mkdir is the claim"]
+    A["Agent A"] -->|"emuriad check-in"| LS["<b>lock store</b><br/><code>~/.emulator-locks</code><br/>one dir per device · mkdir is the claim"]
     B["Agent B<br/><i>claimed nothing</i>"] --> CB
 
     LS -->|"5556 is yours"| CA["<code>adb -s 5556 install app.apk</code>"]
@@ -62,7 +62,7 @@ flowchart TB
     HOOK -->|"caller owns it"| OK["<b>Executes</b><br/>lease refreshed, action recorded"]
     HOOK -->|"caller does not"| NO["<b>Refused</b> — never reaches adb<br/>names the owner and their branch,<br/>plus the state of the pool"]
 
-    NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>claim your own: emuriad claim”"]
+    NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>check in to your own: emuriad check-in”"]
     NO --> BUSY["<i>others are busy</i><br/>“4 held by other sessions, earliest frees in 1h 42m —<br/>claim your own, or tell the user; never take theirs”"]
 
     OK --> LAB["<b>emuriad-lab</b> :7337 — who holds what, lease left, what each is doing"]
@@ -88,7 +88,7 @@ stopped before it ever reaches `adb`.
 A refusal is the one message an agent reads at the exact moment it needs direction, so it
 carries what the lock store knows: how many devices other sessions hold, how many leases
 have expired and are reclaimable now, and when the next one frees — and it always ends in
-the one correct move, `emuriad claim`. The hook cannot see which emulators are running or
+the one correct move, `emuriad check-in`. The hook cannot see which emulators are running or
 which AVDs are free (that takes adb, which it never starts), so it never declares the
 machine full; `claim` does, and then the message is **tell the user**, never "take one".
 A generic "claim a device first" leaves an agent guessing, and a guessing agent retries in
@@ -96,7 +96,7 @@ a loop.
 
 It reports a count, never a specific serial: two agents refused in the same instant would
 both be sent after the same device, and one would lose a race it had just been promised.
-`emuriad claim` does the atomic tie-break itself.
+`emuriad check-in` does the atomic tie-break itself.
 
 The failures above stop being possible:
 
@@ -201,17 +201,21 @@ The shims go away in a later release.
 ## Use
 
 ```bash
-emuriad claim --pool               # a disposable, ready-made device (see "The pool")
-emuriad claim --pool --window      # the same, in a window you can watch
-emuriad claim                      # or reserve an ordinary AVD
-emuriad claim --avd medium_phone   # a specific one
-emuriad claim --note "checkout flake repro"
-emuriad doctor emulator-5556       # is this device ready to test on?
-emuriad status                     # who owns what
-emuriad reclaim                    # device died — same AVD (or a fresh pool instance)
-emuriad release emulator-5556      # done
-emuriad reap                       # clear provably dead locks
+emuriad check-in --pool               # a disposable, ready-made device (see "The pool")
+emuriad check-in --pool --window      # the same, in a window you can watch
+emuriad check-in                      # or reserve an ordinary AVD
+emuriad check-in --avd medium_phone   # a specific one
+emuriad check-in --note "checkout flake repro"
+emuriad doctor emulator-5556          # is this device ready to test on?
+emuriad status                        # who owns what
+emuriad extend-stay emulator-5556     # keep it through a long silent stretch
+emuriad reclaim                       # device died — same AVD (or a fresh pool instance)
+emuriad check-out emulator-5556       # done
+emuriad reap                          # clear provably dead locks
 ```
+
+`claim`, `release` and `heartbeat` — the names before 0.3.1 — still work, as the
+same commands as `check-in`, `check-out` and `extend-stay`.
 
 Always target your own serial explicitly — `adb -s <your-serial> …`, never bare
 `adb shell`. Gradle's `install*`/`connected*` tasks need it inline:
@@ -227,7 +231,7 @@ different AVD entirely. After a crash use `emuriad reclaim`, never a remembered
 ### The pool
 
 An ordinary AVD carries whatever the last session left on it. A pool instance does not:
-`emuriad claim --pool` boots a read-only copy of one AVD from its `golden` snapshot, so
+`emuriad check-in --pool` boots a read-only copy of one AVD from its `golden` snapshot, so
 every instance starts identical, and releasing it shuts it down so nothing you changed
 reaches the next agent. Booting from the snapshot takes seconds.
 
@@ -250,7 +254,7 @@ own snapshot:
 
 ```bash
 emuriad pool bake --window         # once: saves golden-window from a windowed boot
-emuriad claim --pool --window      # a disposable pool instance, in a window
+emuriad check-in --pool --window      # a disposable pool instance, in a window
 ```
 
 The guard holds each boot to its snapshot — `golden` needs `-no-window`,

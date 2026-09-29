@@ -24,11 +24,11 @@
 # is blocked. `emuriad init` wires it for you, once, after asking.
 #
 # Usage:
-#   emuriad claim --pool [--window] [--additional] [--note TEXT]   a disposable pool instance
-#   emuriad claim [--avd NAME] [--require-booted] [--additional] [--note TEXT]
+#   emuriad check-in --pool [--window] [--additional] [--note TEXT]   a disposable pool instance
+#   emuriad check-in [--avd NAME] [--require-booted] [--additional] [--note TEXT]
 #   emuriad reclaim [--note TEXT]
-#   emuriad release <serial> [--kill] [--force]
-#   emuriad heartbeat <serial>
+#   emuriad check-out <serial> [--kill] [--force]
+#   emuriad extend-stay <serial>
 #   emuriad status
 #   emuriad reap
 #   emuriad pool status | bake [--window] [--apk PATH] | rebake    build the pool's golden snapshots
@@ -39,7 +39,10 @@
 #   emuriad guard                                       the PreToolUse hook itself (stdin: payload)
 #   emuriad version
 #
-# Multi-device claims: plain `claim` is one-device-per-owner by default (the
+# claim, release and heartbeat, the names before 0.3.1, still work: they are the
+# same commands as check-in, check-out and extend-stay.
+#
+# Multi-device claims: plain `check-in` is one-device-per-owner by default (the
 # "already held" short-circuit below) -- a convenience default, not a security
 # boundary. The real boundary is per-serial OWNER_ID, enforced by the guard
 # hook. Pass `--additional` to claim a second (or Nth) device under this same
@@ -47,10 +50,10 @@
 # `reclaim` only ever tracks your newest lock.
 #
 # Identity is the AVD name, not the port. Serial (emulator-5554) is assigned at
-# boot and will change. After a crash, run `reclaim` (or `claim --avd NAME`) —
+# boot and will change. After a crash, run `reclaim` (or `check-in --avd NAME`) —
 # never re-run an old `-port 5554` command; that port may boot a different AVD.
 #
-# The pool: `claim --pool` hands out a read-only instance of one AVD booted
+# The pool: `check-in --pool` hands out a read-only instance of one AVD booted
 # from its `golden` snapshot (`emuriad pool bake` makes it). `-read-only` lets
 # several instances share the AVD and never saves back, so every instance
 # starts identical and nothing an agent does survives it. That is why pool
@@ -63,7 +66,7 @@
 # Headless by default. A snapshot only loads under the display setup it was
 # saved with, so a device someone can watch needs its own snapshot:
 # `emuriad pool bake --window` saves `golden-window` from a windowed boot, and
-# `claim --pool --window` boots from it with a window. Each snapshot refuses
+# `check-in --pool --window` boots from it with a window. Each snapshot refuses
 # the other mode (the emulator deletes a snapshot it cannot load; the guard
 # refuses the mismatched boot, and both are read-only on disk).
 #
@@ -93,7 +96,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 BOOT_GRACE=600
@@ -487,7 +490,7 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
   # turned into it: the display is fixed at boot.
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial" \
     && [[ "$(pool_snapshot_of "$our_serial")" != "$snapshot" ]] && adb_all_serials | grep -qx "$our_serial"; then
-    die "claim --pool: you hold $our_serial, booted from '$(pool_snapshot_of "$our_serial")' — release it first (emuriad release $our_serial), or keep it and add this one with --additional"
+    die "check-in --pool: you hold $our_serial, booted from '$(pool_snapshot_of "$our_serial")' — release it first (emuriad check-out $our_serial), or keep it and add this one with --additional"
   fi
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial"; then
     if adb_booted_serials | grep -qx "$our_serial"; then
@@ -514,11 +517,11 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
 
   # Always a fresh boot from the snapshot (seconds), within the cap.
   if ! pool_snapshot_ready "$snapshot"; then
-    [[ "$window" == 1 ]] && die "claim --pool --window: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first (a window opens for a few minutes): emuriad pool bake --window"
-    die "claim --pool: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first: emuriad pool bake"
+    [[ "$window" == 1 ]] && die "check-in --pool --window: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first (a window opens for a few minutes): emuriad pool bake --window"
+    die "check-in --pool: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first: emuriad pool bake"
   fi
   in_use="$(pool_lock_count)"
-  (( in_use < POOL_MAX )) || die "claim --pool: the pool is full ($in_use/$POOL_MAX). $(next_free_hint)"
+  (( in_use < POOL_MAX )) || die "check-in --pool: the pool is full ($in_use/$POOL_MAX). $(next_free_hint)"
   all_serials="$(adb_all_serials)"
   port=""
   for candidate in $(seq 5554 2 5584); do
@@ -527,7 +530,7 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
     if [[ "$DRY_RUN" == 1 ]]; then port="$candidate"; break; fi
     if try_lock "emulator-$candidate"; then port="$candidate"; break; fi
   done
-  [[ -z "$port" ]] && die "claim --pool: every emulator port (5554-5584) is reserved. $(next_free_hint)"
+  [[ -z "$port" ]] && die "check-in --pool: every emulator port (5554-5584) is reserved. $(next_free_hint)"
   serial="emulator-$port"
 
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -538,7 +541,7 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
   # Re-count now that the port is ours: a concurrent claim may have filled the pool.
   if (( $(pool_lock_count) >= POOL_MAX )); then
     rm -rf "$LOCK_ROOT/$serial"
-    die "claim --pool: the pool filled up while claiming ($POOL_MAX/$POOL_MAX) — retry after a release"
+    die "check-in --pool: the pool filled up while claiming ($POOL_MAX/$POOL_MAX) — retry after a release"
   fi
   write_meta "$serial" "$POOL_AVD" "$port" "booting" "$note" 1 "$snapshot"
   echo "claimed: $serial (boot needed, pool instance of $POOL_AVD, $mode)"
@@ -561,18 +564,18 @@ cmd_claim() {
     --require-booted) require_booted=1; shift ;;
     --additional) additional=1; shift ;;
     --note) note="$2"; shift 2 ;;
-    *) die "claim: unknown option $1" ;;
+    *) die "check-in: unknown option $1" ;;
     esac
   done
 
   mkdir -p "$LOCK_ROOT"
 
   if (( pool )); then
-    [[ -z "$want_avd" ]] || die "claim: --pool and --avd are exclusive (the pool always uses $POOL_AVD)"
+    [[ -z "$want_avd" ]] || die "check-in: --pool and --avd are exclusive (the pool always uses $POOL_AVD)"
     claim_pool "$note" "$additional" "$window"
     return
   fi
-  (( window )) && die "claim: --window is for pool instances (claim --pool --window); a named AVD boots with a window already"
+  (( window )) && die "check-in: --window is for pool instances (check-in --pool --window); a named AVD boots with a window already"
 
   # AVD name is identity. If this owner already reserved one, keep it —
   # even when the qemu process died and the old serial/port is gone.
@@ -640,7 +643,7 @@ cmd_claim() {
     fi
   done
 
-  (( require_booted )) && die "claim: no free booted emulator (--require-booted)"
+  (( require_booted )) && die "check-in: no free booted emulator (--require-booted)"
 
   # 2) Reserve a free port + free AVD, hand back the boot command.
   local all_serials
@@ -652,7 +655,7 @@ cmd_claim() {
     if [[ "$DRY_RUN" == 1 ]]; then port="$candidate"; break; fi
     if try_lock "emulator-$candidate"; then port="$candidate"; break; fi
   done
-  [[ -z "$port" ]] && die "claim: every emulator port (5554-5584) is reserved. $(next_free_hint)"
+  [[ -z "$port" ]] && die "check-in: every emulator port (5554-5584) is reserved. $(next_free_hint)"
   serial="emulator-$port"
 
   used_avds="$(avds_in_use)"
@@ -664,15 +667,15 @@ cmd_claim() {
   if [[ -n "$want_avd" ]]; then
     if ! "$EMU_BIN" -list-avds 2>/dev/null | grep -qx "$want_avd"; then
       [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
-      die "claim: no such AVD '$want_avd'"
+      die "check-in: no such AVD '$want_avd'"
     fi
     if echo "$used_avds" | grep -qx "$want_avd"; then
       [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
-      die "claim: AVD '$want_avd' is in use by another lock or running emulator"
+      die "check-in: AVD '$want_avd' is in use by another lock or running emulator"
     fi
     if [[ "$DRY_RUN" != 1 ]] && ! try_avd_lock "$want_avd" "$serial"; then
       rm -rf "$LOCK_ROOT/$serial"
-      die "claim: AVD '$want_avd' was locked by another agent just now — retry"
+      die "check-in: AVD '$want_avd' was locked by another agent just now — retry"
     fi
     avd="$want_avd"
   else
@@ -686,7 +689,7 @@ cmd_claim() {
   fi
   if [[ -z "$avd" ]]; then
     [[ "$DRY_RUN" == 1 ]] || rm -rf "$LOCK_ROOT/$serial"
-    die "claim: every installed AVD is in use. Create another AVD, or wait. $(next_free_hint)"
+    die "check-in: every installed AVD is in use. Create another AVD, or wait. $(next_free_hint)"
   fi
 
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -716,7 +719,7 @@ cmd_reclaim() {
   mkdir -p "$LOCK_ROOT"
   local our_serial avd
   our_serial="$(find_our_lock)"
-  [[ -n "$our_serial" ]] || die "reclaim: this session has no prior claim. Use: emuriad claim [--pool | --avd NAME]"
+  [[ -n "$our_serial" ]] || die "reclaim: this session has no prior claim. Use: emuriad check-in [--pool | --avd NAME]"
   if is_pool_lock "$our_serial"; then
     echo "reclaiming a pool instance (previous serial $our_serial; any instance will do)"
     if [[ "$(pool_snapshot_of "$our_serial")" == "$POOL_SNAPSHOT_WINDOW" ]]; then
@@ -727,7 +730,7 @@ cmd_reclaim() {
     return
   fi
   avd="$(meta_get "$our_serial" AVD)"
-  [[ -n "$avd" && "$avd" != "unknown" ]] || die "reclaim: lock $our_serial has no AVD name — pass claim --avd NAME"
+  [[ -n "$avd" && "$avd" != "unknown" ]] || die "reclaim: lock $our_serial has no AVD name — pass check-in --avd NAME"
   echo "reclaiming AVD $avd (previous serial $our_serial; port may change)"
   if [[ -n "$note" ]]; then
     cmd_claim --avd "$avd" --note "$note"
@@ -742,17 +745,17 @@ cmd_release() {
     case "$1" in
     --kill) kill=1; shift ;;
     --force) force=1; shift ;;
-    -*) die "release: unknown option $1" ;;
+    -*) die "check-out: unknown option $1" ;;
     *) serial="$1"; shift ;;
     esac
   done
-  [[ -n "$serial" ]] || die "release: serial required (e.g. emulator-5554)"
-  [[ -d "$LOCK_ROOT/$serial" ]] || { echo "release: no lock for $serial (nothing to do)"; return 0; }
+  [[ -n "$serial" ]] || die "check-out: serial required (e.g. emulator-5554)"
+  [[ -d "$LOCK_ROOT/$serial" ]] || { echo "check-out: no lock for $serial (nothing to do)"; return 0; }
 
   local lock_owner
   lock_owner="$(meta_get "$serial" OWNER_ID)"
   if [[ -n "$lock_owner" && "$lock_owner" != "$(owner_id)" && "$force" != 1 ]]; then
-    die "release: $serial is owned by another agent ($lock_owner, branch: $(meta_get "$serial" OWNER_BRANCH)). Use --force only if you are sure."
+    die "check-out: $serial is owned by another agent ($lock_owner, branch: $(meta_get "$serial" OWNER_BRANCH)). Use --force only if you are sure."
   fi
 
   # A pool instance is always shut down on release: -read-only only resets on
@@ -777,11 +780,11 @@ cmd_release() {
 
 cmd_heartbeat() { # refresh the lease (for wrapper scripts holding a device)
   local serial="${1:-}"
-  [[ -n "$serial" ]] || die "heartbeat: serial required"
-  [[ -d "$LOCK_ROOT/$serial" ]] || die "heartbeat: no lock for $serial"
+  [[ -n "$serial" ]] || die "extend-stay: serial required"
+  [[ -d "$LOCK_ROOT/$serial" ]] || die "extend-stay: no lock for $serial"
   local lock_owner
   lock_owner="$(meta_get "$serial" OWNER_ID)"
-  [[ -z "$lock_owner" || "$lock_owner" == "$(owner_id)" ]] || die "heartbeat: $serial is owned by another agent"
+  [[ -z "$lock_owner" || "$lock_owner" == "$(owner_id)" ]] || die "extend-stay: $serial is owned by another agent"
   touch "$LOCK_ROOT/$serial/last_used"
 }
 
@@ -822,7 +825,7 @@ cmd_status() {
   if [[ -d "$AVD_HOME/$POOL_AVD.avd" ]]; then
     local snap="missing — emuriad pool bake" window=""
     pool_snapshot_ready && snap="ready"
-    pool_snapshot_ready "$POOL_SNAPSHOT_WINDOW" && window=" · '$POOL_SNAPSHOT_WINDOW' ready (claim --pool --window)"
+    pool_snapshot_ready "$POOL_SNAPSHOT_WINDOW" && window=" · '$POOL_SNAPSHOT_WINDOW' ready (check-in --pool --window)"
     echo "agent pool: $(pool_lock_count)/$POOL_MAX claimed · AVD $POOL_AVD · snapshot '$POOL_SNAPSHOT' $snap$window"
   fi
 }
@@ -1012,13 +1015,13 @@ main() {
   esac
   require_adb
   case "$cmd" in
-  claim) cmd_claim "$@" ;;
+  check-in|claim) cmd_claim "$@" ;;
   reclaim) cmd_reclaim "$@" ;;
-  release) cmd_release "$@" ;;
-  heartbeat) cmd_heartbeat "$@" ;;
+  check-out|release) cmd_release "$@" ;;
+  extend-stay|heartbeat) cmd_heartbeat "$@" ;;
   status) cmd_status "$@" ;;
   reap) cmd_reap "$@" ;;
-  *) die "unknown command: $cmd (claim|reclaim|release|heartbeat|status|reap|pool|doctor|evidence|init|guard|version)" ;;
+  *) die "unknown command: $cmd (check-in|reclaim|check-out|extend-stay|status|reap|pool|doctor|evidence|init|guard|version)" ;;
   esac
 }
 
