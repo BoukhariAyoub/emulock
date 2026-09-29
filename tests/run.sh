@@ -194,21 +194,29 @@ except Exception: print("")'
   }
 
   hint="$(ask_hint)"
-  has "empty pool tells you to claim" "$hint" "No devices are claimed"
+  has "empty store tells you to claim" "$hint" "No other session holds a device"
 
   mk_lock emulator-5599 600
   mk_lock emulator-5601 9240
   hint="$(ask_hint)"
-  has "fully-booked pool says stop"      "$hint" "Report this to the user"
-  has "...and when one frees up"         "$hint" "frees in"
-  case "$hint" in
-    *"claim your own"*) bad "fully-booked pool does not say claim" "no claim advice" "$hint" ;;
-    *) ok "fully-booked pool does not say claim" ;;
-  esac
+  has "a busy store still sends you to claim" "$hint" "Claim your own: emulock claim"
+  has "...says when a lease frees"             "$hint" "frees in"
+  has "...and not to take someone else's"      "$hint" "tell the user rather than taking"
 
   mk_lock emulator-5603 20000
   hint="$(ask_hint)"
   has "expired lease is surfaced as reclaimable" "$hint" "expired lease and reclaimable now"
+
+  # Your own locks are not "held" as far as what is left for you goes.
+  local own_probe="$hint_probe"
+  hint_probe="$(mktemp -d)"
+  mkdir -p "$hint_probe/emulator-5605"
+  printf 'SERIAL=emulator-5605\nOWNER_ID=claude-code:%s\n' "$SESSION" >"$hint_probe/emulator-5605/meta"
+  : >"$hint_probe/emulator-5605/last_used"
+  hint="$(ask_hint)"
+  has "your own lock does not count as held" "$hint" "No other session holds a device"
+  rm -rf "$hint_probe"
+  hint_probe="$own_probe"
 
   # Never name a serial: two agents refused at once would race for it.
   case "$hint" in

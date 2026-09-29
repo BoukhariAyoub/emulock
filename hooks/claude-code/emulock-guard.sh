@@ -240,6 +240,8 @@ availability_hint() {
   now="$(date +%s)"
   for d in "$LOCK_ROOT"/emulator-*; do
     [[ -d "$d" ]] || continue
+    # Only other sessions' locks say anything about what is left for you.
+    [[ "$(lock_owner "${d##*/}")" == "$ME" ]] && continue
     held=$(( held + 1 ))
     stamp="$(mtime_of "$d/last_used")"
     idle=$(( now - stamp ))
@@ -251,14 +253,17 @@ availability_hint() {
     fi
   done
 
+  # The hook cannot see which emulators are running or which AVDs are free (that
+  # needs adb), so it never decides the machine is full: `emulock claim` does, and
+  # says so itself. What the lock store can add is how busy it is.
   if [[ "$held" -eq 0 ]]; then
-    echo "No devices are claimed right now — claim one: emulock claim"
+    echo "No other session holds a device — claim your own: emulock claim --pool (or emulock claim)"
   elif [[ "$expired" -gt 0 ]]; then
-    echo "$held held, $expired with an expired lease and reclaimable now — claim your own: emulock claim"
+    echo "$held held by other sessions, $expired with an expired lease and reclaimable now — claim your own: emulock claim --pool (or emulock claim)"
   elif [[ -n "$soonest" ]]; then
-    echo "All $held are held and none are reclaimable; the earliest lease frees in $(human_secs "$soonest"). Report this to the user rather than taking a device that isn't yours."
+    echo "$held held by other sessions; the earliest lease frees in $(human_secs "$soonest"). Claim your own: emulock claim --pool (or emulock claim) finds a free one, or says when none is left — then tell the user rather than taking a device that isn't yours."
   else
-    echo "Claim a device first: emulock claim"
+    echo "Claim a device first: emulock claim --pool (or emulock claim)"
   fi
 }
 

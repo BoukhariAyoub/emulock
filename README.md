@@ -63,7 +63,7 @@ flowchart TB
     HOOK -->|"caller does not"| NO["<b>Refused</b> — never reaches adb<br/>names the owner and their branch,<br/>plus the state of the pool"]
 
     NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>claim your own: emulock claim”"]
-    NO --> BUSY["<i>nothing is free</i><br/>“all 5 held, earliest frees in 1h 42m —<br/>report this rather than taking one”"]
+    NO --> BUSY["<i>others are busy</i><br/>“4 held by other sessions, earliest frees in 1h 42m —<br/>claim your own, or tell the user; never take theirs”"]
 
     OK --> LAB["<b>emulock-lab</b> :7337 — who holds what, lease left, what each is doing"]
 
@@ -86,10 +86,13 @@ agent could sidestep, not in a linter it could ignore — so a device-stomping c
 stopped before it ever reaches `adb`.
 
 A refusal is the one message an agent reads at the exact moment it needs direction, so it
-carries the state of the pool: how many devices are held, how many leases have expired and
-are reclaimable now, and when the next one frees. That distinction decides the agent's next
-move — **claim one**, or **stop and tell you**. A generic "claim a device first" leaves it
-guessing, and a guessing agent retries in a loop.
+carries what the lock store knows: how many devices other sessions hold, how many leases
+have expired and are reclaimable now, and when the next one frees — and it always ends in
+the one correct move, `emulock claim`. The hook cannot see which emulators are running or
+which AVDs are free (that takes adb, which it never starts), so it never declares the
+machine full; `claim` does, and then the message is **tell the user**, never "take one".
+A generic "claim a device first" leaves an agent guessing, and a guessing agent retries in
+a loop.
 
 It reports a count, never a specific serial: two agents refused in the same instant would
 both be sent after the same device, and one would lose a race it had just been promised.
