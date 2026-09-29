@@ -1,6 +1,6 @@
-"""What every emulock Python tool shares: identity, the lock store, project config.
+"""What every emuriad Python tool shares: identity, the lock store, project config.
 
-Kept in step with bin/emulock by hand. The rules are small enough that a second
+Kept in step with bin/emuriad by hand. The rules are small enough that a second
 copy is cheaper than a bash <-> python bridge, and tests/run.sh pins both.
 """
 
@@ -16,7 +16,7 @@ AVD_HOME = Path(os.environ.get("ANDROID_AVD_HOME", Path.home() / ".android" / "a
 
 
 def me() -> str:
-    """This session's identity, resolved exactly like owner_id() in bin/emulock."""
+    """This session's identity, resolved exactly like owner_id() in bin/emuriad."""
     if os.environ.get("EMULATOR_LOCK_OWNER"):
         return os.environ["EMULATOR_LOCK_OWNER"]
     if os.environ.get("CLAUDE_CODE_SESSION_ID"):
@@ -42,7 +42,7 @@ def claim_problem(serial: str) -> str | None:
         return None  # physical devices are not in the lock store
     meta = read_meta(serial)
     if meta is None:
-        return f"{serial} is not claimed — emulock claim --pool (or emulock claim)"
+        return f"{serial} is not claimed — emuriad claim --pool (or emuriad claim)"
     owner = meta.get("OWNER_ID", "")
     if owner and owner != me():
         return f"{serial} belongs to another agent (branch {meta.get('OWNER_BRANCH', '?')}) — never touch a device you did not claim"
@@ -61,12 +61,21 @@ def project_root(start: Path | None = None) -> Path:
     return Path(cwd)
 
 
+def config_dir(root: Path) -> Path:
+    """The project's config directory: .emuriad/, or .emulock/ from before the rename."""
+    new, old = root / ".emuriad", root / ".emulock"
+    return old if not new.is_dir() and old.is_dir() else new
+
+
 class Config:
-    """<repo>/.emulock/config: `key = value` lines, first match wins. `#` starts a
+    """<repo>/.emuriad/config: `key = value` lines, first match wins. `#` starts a
     comment at the start of a line or after whitespace (so `a#b` stays a value).
 
-    EMULOCK_<KEY> in the environment overrides a key (dots and dashes become
-    underscores, letters upper-case: pool.avd -> EMULOCK_POOL_AVD).
+    EMURIAD_<KEY> in the environment overrides a key (dots and dashes become
+    underscores, letters upper-case: pool.avd -> EMURIAD_POOL_AVD).
+
+    The pre-rename names still work: .emulock/config when there is no .emuriad/,
+    and EMULOCK_<KEY> when EMURIAD_<KEY> is unset.
     """
 
     def __init__(self, root: Path, values: dict[str, str] | None = None):
@@ -75,7 +84,7 @@ class Config:
         if values is not None:
             self.values = dict(values)
             return
-        path = root / ".emulock" / "config"
+        path = config_dir(root) / "config"
         if path.is_file():
             for raw in path.read_text().splitlines():
                 line = raw.strip()
@@ -88,10 +97,12 @@ class Config:
 
     @staticmethod
     def env_name(key: str) -> str:
-        return "EMULOCK_" + key.upper().replace(".", "_").replace("-", "_")
+        return "EMURIAD_" + key.upper().replace(".", "_").replace("-", "_")
 
     def get(self, key: str, default: str = "") -> str:
-        return os.environ.get(self.env_name(key)) or self.values.get(key) or default
+        name = self.env_name(key)
+        return (os.environ.get(name) or os.environ.get("EMULOCK_" + name[len("EMURIAD_"):])
+                or self.values.get(key) or default)
 
     def variants(self) -> list[str]:
         """Variant names declared as package.<variant> keys."""

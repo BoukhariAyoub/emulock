@@ -1,4 +1,4 @@
-"""Tests for `emulock evidence`.
+"""Tests for `emuriad evidence`.
 
 Run: python3 tests/test_evidence.py   (no pytest needed; tests/run.sh runs it too)
 
@@ -18,7 +18,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-EMULOCK = Path(__file__).resolve().parent.parent / "bin" / "emulock"
+EMURIAD = Path(__file__).resolve().parent.parent / "bin" / "emuriad"
 SERIAL = "emulator-5558"
 SESSION = "test-session"
 
@@ -74,7 +74,7 @@ class EvidenceTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_script(self, *args: str, **env: str) -> subprocess.CompletedProcess:
-        return subprocess.run([str(EMULOCK), "evidence", *args], capture_output=True, text=True, cwd=self.tmp,
+        return subprocess.run([str(EMURIAD), "evidence", *args], capture_output=True, text=True, cwd=self.tmp,
                               env={**self.env, **env})
 
     def calls(self) -> str:
@@ -150,8 +150,8 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual({"image/png", "video/mp4"}, {f["content_type"] for f in manifest["files"]})
 
     def test_the_package_comes_from_the_project_config(self):
-        (self.tmp / ".emulock").mkdir()
-        (self.tmp / ".emulock" / "config").write_text("package = com.example.app\npackage.beta = com.example.beta\n")
+        (self.tmp / ".emuriad").mkdir()
+        (self.tmp / ".emuriad" / "config").write_text("package = com.example.app\npackage.beta = com.example.beta\n")
         self.run_script("start", SERIAL, "--variant", "beta", "--no-video")
         folder = self.folder()
         session = json.loads((folder / "session.json").read_text())
@@ -161,7 +161,7 @@ class EvidenceTest(unittest.TestCase):
         self.run_script("start", SERIAL, "--worktree", str(self.tmp), "--no-video")
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
-        out = subprocess.run([str(EMULOCK), "evidence", "note", SERIAL, "from another cwd"], cwd=elsewhere,
+        out = subprocess.run([str(EMURIAD), "evidence", "note", SERIAL, "from another cwd"], cwd=elsewhere,
                              capture_output=True, text=True, env=self.env)
         self.assertEqual(0, out.returncode, out.stderr)
         self.assertIn("from another cwd", (self.folder() / "notes.jsonl").read_text())

@@ -1,9 +1,9 @@
 ---
-name: emulock
+name: emuriad
 description: Reserve an Android emulator before using it, on a machine where several agents run at once. Use whenever a task needs a device - installing an APK, launching the app, running Maestro or instrumented tests, reading logcat, taking a screenshot, driving the UI, checking a device is ready, recording proof of an on-device test - and whenever a device command is refused, a device dies mid-task, or you need to know who holds what. Triggers on adb, emulator, AVD, "claim a device", "the emulator", "device pool", "device is busy", "blocked", "not claimed by anyone", "doctor", "evidence".
 ---
 
-# emulock
+# emuriad
 
 This machine's emulators are shared by several agent sessions at once. Every device
 is reserved before use, and the reservation is **enforced** — a command aimed at a
@@ -17,7 +17,7 @@ refused command in a different shape will not help.
 **1. Claim before you touch anything.** Prefer the pool:
 
 ```bash
-emulock claim --pool --note "<what you are doing>"
+emuriad claim --pool --note "<what you are doing>"
 ```
 
 A pool instance is a disposable copy of a prepared device, booted from a `golden`
@@ -27,11 +27,11 @@ process, then `adb -s <serial> wait-for-device`. Never drop `-no-window` or add 
 `-gpu` flag: the snapshot only loads headless, and a boot that cannot load it makes
 the emulator delete it for everyone (the guard refuses that boot).
 
-When the user wants to **watch or touch** the device, claim `emulock claim --pool --window`
+When the user wants to **watch or touch** the device, claim `emuriad claim --pool --window`
 instead: the same disposable device, booted in a window from its own `golden-window`
 snapshot (if it says the snapshot is missing, tell the user: baking it is theirs to run,
-`emulock pool bake --window`). Its boot command has no `-no-window`; run it verbatim too.
-`emulock claim` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
+`emuriad pool bake --window`). Its boot command has no `-no-window`; run it verbatim too.
+`emuriad claim` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
 specific one.
 `--additional` gets a second device for a two-device test. The `--note` records your
 intent so a human can see why the device is busy; pass it.
@@ -39,7 +39,7 @@ intent so a human can see why the device is busy; pass it.
 **Then check the device** before spending time on it:
 
 ```bash
-emulock doctor <serial>            # --fix applies the safe settings fixes
+emuriad doctor <serial>            # --fix applies the safe settings fixes
 ```
 
 It checks the claim, the boot, the installed build (is it *this* checkout's?),
@@ -65,20 +65,20 @@ device, so they are refused unless you name your serial inline:
 **3. Record what you verified, if a reviewer will ask.**
 
 ```bash
-emulock evidence start <serial> --label "<ticket> <what>"   # after installing your build
-emulock evidence shot  <serial> "<what the screen shows>"
-emulock evidence note  <serial> "<what you did or checked>"
-emulock evidence stop  <serial>      # writes summary.md + manifest.json
+emuriad evidence start <serial> --label "<ticket> <what>"   # after installing your build
+emuriad evidence shot  <serial> "<what the screen shows>"
+emuriad evidence note  <serial> "<what you did or checked>"
+emuriad evidence stop  <serial>      # writes summary.md + manifest.json
 ```
 
 It records the screen, screenshots, crashes and the doctor's report into the
 project's evidence folder. Upload the files in `manifest.json` where reviewers look,
-then `emulock evidence render <folder> --assets <urls.json>` for the summary.
+then `emuriad evidence render <folder> --assets <urls.json>` for the summary.
 
 **4. Release when the task is done.**
 
 ```bash
-emulock release emulator-5556
+emuriad release emulator-5556
 ```
 
 A pool instance is shut down on release, so nothing you changed reaches the next
@@ -88,12 +88,12 @@ agent. An ordinary AVD is left running, warm for the next session.
 
 **A command was refused.** Read the message — it names the owner and the branch.
 Either you never claimed, or you are using a serial that belongs to another session.
-Run `emulock status` to see the truth, then claim your own device.
+Run `emuriad status` to see the truth, then claim your own device.
 
 **The device died mid-task.**
 
 ```bash
-emulock reclaim
+emuriad reclaim
 ```
 
 Never re-run a remembered `emulator -port 5554` command. The serial is assigned at
@@ -109,14 +109,14 @@ another session holds in order to take it.
 **Something looks misconfigured.**
 
 ```bash
-emulock doctor
+emuriad doctor
 ```
 
-With no serial it reports whether emulock itself is installed and enforcement is
+With no serial it reports whether emuriad itself is installed and enforcement is
 actually wired up, and prints the fix. It changes nothing.
 
 **Never install or edit the hook yourself.** If `doctor` says the guard is not wired
-in, tell the user to run `emulock init` themselves — do not run it, and do not edit
+in, tell the user to run `emuriad init` themselves — do not run it, and do not edit
 `settings.json` or anything under `hooks/`. That file is what constrains which
 commands you may run; a hook you can install is a hook you can remove, which would
 make the whole mechanism pointless. Your harness will refuse the edit anyway.
@@ -127,9 +127,9 @@ make the whole mechanism pointless. Your harness will refuse the edit anyway.
   just yours. It is always refused.
 - **Never** `emu kill`, `pm clear`, `install`, `uninstall`, or reboot a serial you
   do not own.
-- **Never** bake or rebake the pool (`emulock pool bake|rebake`) unless the user
+- **Never** bake or rebake the pool (`emuriad pool bake|rebake`) unless the user
   asks: it shuts every pool instance out while it runs.
-- **Never** edit the lock store by hand. `emulock reap` is the only sanctioned
+- **Never** edit the lock store by hand. `emuriad reap` is the only sanctioned
   cleanup, and it removes only provably dead locks.
 - **Never** work around a refusal by wrapping the command in `bash -c`, a script, or
   a heredoc. The guard inspects the top-level command only; evading it is not a
@@ -138,8 +138,8 @@ make the whole mechanism pointless. Your harness will refuse the edit anyway.
 ## Checking state
 
 ```bash
-emulock status     # who owns what, in the terminal
-emulock-lab        # live dashboard on 127.0.0.1:7337, read-only
+emuriad status     # who owns what, in the terminal
+emuriad-lab        # live dashboard on 127.0.0.1:7337, read-only
 ```
 
 The dashboard shows each device's state, the branch it was claimed on, and what its
@@ -148,7 +148,7 @@ owner is currently doing — `Running flow · checkout.yaml`, `Installing`,
 
 A lease expires after 4 hours idle. Your own commands refresh it automatically, so a
 device stays yours while you are actually using it. If you hold one through a long
-silent stretch, `emulock heartbeat <serial>` keeps it.
+silent stretch, `emuriad heartbeat <serial>` keeps it.
 
 ## Identity is the AVD, not the port
 

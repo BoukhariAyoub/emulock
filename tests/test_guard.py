@@ -18,16 +18,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-GUARD = Path(__file__).resolve().parents[1] / "hooks" / "claude-code" / "emulock-guard.sh"
+GUARD = Path(__file__).resolve().parents[1] / "hooks" / "claude-code" / "emuriad-guard.sh"
 SESSION = "test-session"
 ME = f"claude-code:{SESSION}"
 MINE, THEIRS = "emulator-5599", "emulator-5601"
 EMULATOR = "~/Library/Android/sdk/emulator/emulator"
 POOL = "agent_pool"
-# What `emulock claim --pool` prints, on this session's port.
+# What `emuriad claim --pool` prints, on this session's port.
 POOL_BOOT = (f"{EMULATOR} @{POOL} -port 5599 -no-boot-anim -read-only -snapshot golden "
              "-force-snapshot-load -no-snapshot-save -no-window")
-# What `emulock pool bake` runs: a writable cold boot that loads no snapshot.
+# What `emuriad pool bake` runs: a writable cold boot that loads no snapshot.
 BAKE_BOOT = f"{EMULATOR} @{POOL} -port 5599 -no-snapshot-load -no-snapshot-save -no-boot-anim -no-window"
 
 
@@ -42,7 +42,7 @@ class GuardTest(unittest.TestCase):
             (path / "last_used").touch()
         self.avd_home = self.tmp / "avd"
         (self.avd_home / f"{POOL}.avd").mkdir(parents=True)
-        (self.avd_home / f"{POOL}.avd" / "emulock-pool").touch()   # left by `emulock pool bake`
+        (self.avd_home / f"{POOL}.avd" / "emuriad-pool").touch()   # left by `emuriad pool bake`
         (self.avd_home / f"{POOL}_old.avd").mkdir(parents=True)    # an ordinary AVD
 
     def tearDown(self):
@@ -50,7 +50,7 @@ class GuardTest(unittest.TestCase):
 
     def decide(self, command: str, **env: str) -> str:
         payload = json.dumps({"session_id": SESSION, "tool_input": {"command": command}})
-        base = {k: v for k, v in os.environ.items() if not k.startswith(("EMULOCK_", "EMULATOR_POOL"))}
+        base = {k: v for k, v in os.environ.items() if not k.startswith(("EMURIAD_", "EMULOCK_", "EMULATOR_POOL"))}
         out = subprocess.run(
             ["/bin/bash", str(GUARD)], input=payload, capture_output=True, text=True,
             env={**base, "EMULATOR_LOCK_DIR": str(self.locks), "ANDROID_AVD_HOME": str(self.avd_home),
@@ -92,7 +92,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual("allow", self.decide(BAKE_BOOT))
 
     def test_a_boot_chained_after_a_claim_is_still_checked(self):
-        command = f"emulock claim --pool && {POOL_BOOT.replace(' -no-window', '')}"
+        command = f"emuriad claim --pool && {POOL_BOOT.replace(' -no-window', '')}"
         self.assertEqual("deny", self.decide(command))
 
     def test_flags_count_only_in_the_pool_boots_own_segment(self):
@@ -135,7 +135,7 @@ class GuardTest(unittest.TestCase):
         (legacy / "golden.json").write_text("{}")
         self.assertEqual("deny", self.decide(f"emulator @legacy_pool -port 5599 -read-only"))
         self.assertEqual("deny", self.decide(f"emulator @named_pool -port 5599 -read-only",
-                                             EMULOCK_POOL_AVD="named_pool"))
+                                             EMURIAD_POOL_AVD="named_pool"))
 
     # --- Gradle device tasks ------------------------------------------------------------
 
@@ -156,15 +156,15 @@ class GuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(expected, self.decide(command))
 
-    # --- emulock itself -----------------------------------------------------------------
+    # --- emuriad itself -----------------------------------------------------------------
 
-    def test_only_a_command_that_is_one_emulock_call_skips_the_checks(self):
-        self.assertEqual("allow", self.decide("emulock status"))
-        self.assertEqual("allow", self.decide("/opt/homebrew/bin/emulock release emulator-5599"))
-        self.assertEqual("allow", self.decide("EMULATOR_LOCK_OWNER=x emulock claim --pool"))
+    def test_only_a_command_that_is_one_emuriad_call_skips_the_checks(self):
+        self.assertEqual("allow", self.decide("emuriad status"))
+        self.assertEqual("allow", self.decide("/opt/homebrew/bin/emuriad release emulator-5599"))
+        self.assertEqual("allow", self.decide("EMULATOR_LOCK_OWNER=x emuriad claim --pool"))
         # Merely mentioning the word used to let anything through.
-        self.assertEqual("deny", self.decide(f"cd ~/src/emulock && adb -s {THEIRS} shell ls"))
-        self.assertEqual("deny", self.decide(f"emulock status; adb -s {THEIRS} shell ls"))
+        self.assertEqual("deny", self.decide(f"cd ~/src/emuriad && adb -s {THEIRS} shell ls"))
+        self.assertEqual("deny", self.decide(f"emuriad status; adb -s {THEIRS} shell ls"))
 
     # --- rules that must keep holding ------------------------------------------------
 

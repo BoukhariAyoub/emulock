@@ -1,8 +1,8 @@
-# emulock
+# emuriad
 
 **Stop parallel coding agents from fighting over the same Android emulator.**
 
-![emulock-lab — the read-only dashboard](docs/device-lab.png)
+![emuriad-lab — the read-only dashboard](docs/device-lab.png)
 
 ## The problem
 
@@ -35,12 +35,12 @@ Every device is reserved before use, and **the reservation is enforced by the ha
 not by the agent's good manners**:
 
 ```
-$ emulock claim
+$ emuriad claim
 emulator-5556  (AVD: medium_phone)  claimed by claude-code:15db96f9
 
 $ adb -s emulator-5560 shell input tap 100 200
 Blocked: emulator-5560 belongs to another agent (branch: fix/checkout-flake).
-Never touch a device you didn't claim. Claim your own with: emulock claim
+Never touch a device you didn't claim. Claim your own with: emuriad claim
 ```
 
 That is not a warning the agent can read and ignore. The command never runs.
@@ -49,7 +49,7 @@ That is not a warning the agent can read and ignore. The command never runs.
 
 ```mermaid
 flowchart TB
-    A["Agent A"] -->|"emulock claim"| LS["<b>lock store</b><br/><code>~/.emulator-locks</code><br/>one dir per device · mkdir is the claim"]
+    A["Agent A"] -->|"emuriad claim"| LS["<b>lock store</b><br/><code>~/.emulator-locks</code><br/>one dir per device · mkdir is the claim"]
     B["Agent B<br/><i>claimed nothing</i>"] --> CB
 
     LS -->|"5556 is yours"| CA["<code>adb -s 5556 install app.apk</code>"]
@@ -62,10 +62,10 @@ flowchart TB
     HOOK -->|"caller owns it"| OK["<b>Executes</b><br/>lease refreshed, action recorded"]
     HOOK -->|"caller does not"| NO["<b>Refused</b> — never reaches adb<br/>names the owner and their branch,<br/>plus the state of the pool"]
 
-    NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>claim your own: emulock claim”"]
+    NO --> FREE["<i>something is reclaimable</i><br/>“3 held, 1 lease expired —<br/>claim your own: emuriad claim”"]
     NO --> BUSY["<i>others are busy</i><br/>“4 held by other sessions, earliest frees in 1h 42m —<br/>claim your own, or tell the user; never take theirs”"]
 
-    OK --> LAB["<b>emulock-lab</b> :7337 — who holds what, lease left, what each is doing"]
+    OK --> LAB["<b>emuriad-lab</b> :7337 — who holds what, lease left, what each is doing"]
 
     classDef n fill:#161b22,stroke:#484f58,color:#c9d1d9
     classDef h fill:#12203a,stroke:#3b82f6,color:#cfe3ff,stroke-width:2px
@@ -88,7 +88,7 @@ stopped before it ever reaches `adb`.
 A refusal is the one message an agent reads at the exact moment it needs direction, so it
 carries what the lock store knows: how many devices other sessions hold, how many leases
 have expired and are reclaimable now, and when the next one frees — and it always ends in
-the one correct move, `emulock claim`. The hook cannot see which emulators are running or
+the one correct move, `emuriad claim`. The hook cannot see which emulators are running or
 which AVDs are free (that takes adb, which it never starts), so it never declares the
 machine full; `claim` does, and then the message is **tell the user**, never "take one".
 A generic "claim a device first" leaves an agent guessing, and a guessing agent retries in
@@ -96,7 +96,7 @@ a loop.
 
 It reports a count, never a specific serial: two agents refused in the same instant would
 both be sent after the same device, and one would lose a race it had just been promised.
-`emulock claim` does the atomic tie-break itself.
+`emuriad claim` does the atomic tie-break itself.
 
 The failures above stop being possible:
 
@@ -108,9 +108,9 @@ The failures above stop being possible:
 | Booting the wrong AVD on a recycled port | a launch must use the port *and* AVD you reserved |
 | `./gradlew installDebug` hitting every connected device | refused unless `ANDROID_SERIAL` names your own device |
 | A device still carrying the last agent's state | pool instances start from a snapshot and are shut down on release |
-| Testing the wrong build | `emulock doctor` checks the installed APK is your checkout's |
+| Testing the wrong build | `emuriad doctor` checks the installed APK is your checkout's |
 | Locks outliving the session | leases expire after 4h idle and are reclaimable |
-| Not knowing who holds what | `emulock status`, or a live dashboard |
+| Not knowing who holds what | `emuriad status`, or a live dashboard |
 
 ## A lock an agent can't route around
 
@@ -118,7 +118,7 @@ Reservation schemes usually ask for cooperation: the agent is supposed to check 
 Agents shell out constantly, and a device-stomping command looks completely reasonable
 in isolation — so eventually one skips the check and the reservation means nothing.
 
-emulock installs a `PreToolUse` hook. The harness refuses the command before it
+emuriad installs a `PreToolUse` hook. The harness refuses the command before it
 executes. The lock stops being a convention and becomes a boundary.
 
 Two halves make that work:
@@ -139,30 +139,30 @@ corrupt the image. That scarcity is what makes locking worth enforcing.
 Requires `bash`, `jq`, `python3`, and the Android SDK platform-tools. macOS and Linux.
 
 ```bash
-brew install boukhariayoub/emulock/emulock
-emulock init
+brew install boukhariayoub/emuriad/emuriad
+emuriad init
 ```
 
 `init` does two things, and shows each change before making it:
 
-1. links the **skill** into `~/.claude/skills/emulock`, so agents learn the protocol
+1. links the **skill** into `~/.claude/skills/emuriad`, so agents learn the protocol
    up front instead of by being refused;
 2. adds the **guard** to `~/.claude/settings.json` as a `PreToolUse` hook, so every
    project on the machine is covered. It asks first, and without a terminal it prints
    the change and stops: a hook decides which commands an agent may run, so wiring it
    is a step for a person, not for an agent.
 
-For a team, `emulock init --project` writes the hook and a copy of the skill into the
-repo's `.claude/` instead; commit them and every contributor who has emulock
+For a team, `emuriad init --project` writes the hook and a copy of the skill into the
+repo's `.claude/` instead; commit them and every contributor who has emuriad
 installed is covered. Nothing else is needed per project.
 
-Without Homebrew: `git clone https://github.com/BoukhariAyoub/emulock.git && cd emulock && ./install.sh`,
-then `emulock init`.
+Without Homebrew: `git clone https://github.com/BoukhariAyoub/emuriad.git && cd emuriad && ./install.sh`,
+then `emuriad init`.
 
 Verify:
 
 ```bash
-emulock doctor          # is emulock installed, and is enforcement actually wired up?
+emuriad doctor          # is emuriad installed, and is enforcement actually wired up?
 ./tests/run.sh          # the suite, no dependencies
 ```
 
@@ -170,22 +170,47 @@ emulock doctor          # is emulock installed, and is enforcement actually wire
 > that cannot parse its input exits 0 — which means *allow*. Without `jq`, `claim` and
 > `status` still work and **nothing is enforced, silently.** It can't fail closed
 > instead: a hook that denied on its own breakage would block every shell command on
-> the machine with no way to repair it. Homebrew installs `jq` with emulock;
-> `emulock doctor` checks for it either way.
+> the machine with no way to repair it. Homebrew installs `jq` with emuriad;
+> `emuriad doctor` checks for it either way.
+
+### Renamed from emulock
+
+emuriad was called **emulock** before 0.3. Nothing you set up then stops working:
+
+- `emulock` and `emulock-lab` are still installed, as shims that print a one-line
+  notice and run `emuriad`. `emulock guard` stays silent, so a hook wired to it keeps
+  enforcing without noise. So does a settings file pointing at `emulock-guard.sh`.
+- The lock store (`~/.emulator-locks/`) and every `EMULATOR_*` variable are unchanged,
+  so existing locks carry over.
+- A project's `.emulock/` directory is still read when there is no `.emuriad/`, and
+  `EMULOCK_<KEY>` still overrides a key when `EMURIAD_<KEY>` is unset. A doctor plugin
+  that imports `emulock_doctor` still loads. A pool AVD baked as `emulock-pool` is
+  still a pool AVD, and the default pool AVD name stays `emulock_pool`.
+
+To move over:
+
+```bash
+brew uninstall emulock && brew untap boukhariayoub/emulock
+brew install boukhariayoub/emuriad/emuriad
+emuriad init            # finds the old hook and skill, shows the change, asks first
+git mv .emulock .emuriad   # in each project, when convenient
+```
+
+The shims go away in a later release.
 
 ## Use
 
 ```bash
-emulock claim --pool               # a disposable, ready-made device (see "The pool")
-emulock claim --pool --window      # the same, in a window you can watch
-emulock claim                      # or reserve an ordinary AVD
-emulock claim --avd medium_phone   # a specific one
-emulock claim --note "checkout flake repro"
-emulock doctor emulator-5556       # is this device ready to test on?
-emulock status                     # who owns what
-emulock reclaim                    # device died — same AVD (or a fresh pool instance)
-emulock release emulator-5556      # done
-emulock reap                       # clear provably dead locks
+emuriad claim --pool               # a disposable, ready-made device (see "The pool")
+emuriad claim --pool --window      # the same, in a window you can watch
+emuriad claim                      # or reserve an ordinary AVD
+emuriad claim --avd medium_phone   # a specific one
+emuriad claim --note "checkout flake repro"
+emuriad doctor emulator-5556       # is this device ready to test on?
+emuriad status                     # who owns what
+emuriad reclaim                    # device died — same AVD (or a fresh pool instance)
+emuriad release emulator-5556      # done
+emuriad reap                       # clear provably dead locks
 ```
 
 Always target your own serial explicitly — `adb -s <your-serial> …`, never bare
@@ -196,27 +221,27 @@ refreshes your lease.
 ### Identity is the AVD, not the port
 
 `emulator-5554` is the serial that bound port 5554 *this boot*. Next boot it may be a
-different AVD entirely. After a crash use `emulock reclaim`, never a remembered
+different AVD entirely. After a crash use `emuriad reclaim`, never a remembered
 `-port 5554` command — that port may now be something else.
 
 ### The pool
 
 An ordinary AVD carries whatever the last session left on it. A pool instance does not:
-`emulock claim --pool` boots a read-only copy of one AVD from its `golden` snapshot, so
+`emuriad claim --pool` boots a read-only copy of one AVD from its `golden` snapshot, so
 every instance starts identical, and releasing it shuts it down so nothing you changed
 reaches the next agent. Booting from the snapshot takes seconds.
 
 ```bash
-emulock pool bake                  # build golden once (3–5 min)
-emulock pool rebake                # weekly: bake from a fresh build of main, in a throwaway checkout
-emulock pool status
+emuriad pool bake                  # build golden once (3–5 min)
+emuriad pool rebake                # weekly: bake from a fresh build of main, in a throwaway checkout
+emuriad pool status
 ```
 
 `bake` fixes the settings that waste agent time on a fresh device — Private DNS off
 (it breaks name resolution on the emulator's network), animations off, screen always
 on, no lock screen, a hardware keyboard so the IME never covers the screen — then
 installs your app and runs your project's setup hook if you have one (below). It only
-saves the snapshot if `emulock doctor` agrees the device is clean.
+saves the snapshot if `emuriad doctor` agrees the device is clean.
 
 **Headless by default, watchable on request.** A snapshot loads only under the display
 setup it was saved with — the renderer *and* the window — and a boot that cannot load
@@ -224,8 +249,8 @@ it makes the emulator delete it, for every agent. So a device you can watch has 
 own snapshot:
 
 ```bash
-emulock pool bake --window         # once: saves golden-window from a windowed boot
-emulock claim --pool --window      # a disposable pool instance, in a window
+emuriad pool bake --window         # once: saves golden-window from a windowed boot
+emuriad claim --pool --window      # a disposable pool instance, in a window
 ```
 
 The guard holds each boot to its snapshot — `golden` needs `-no-window`,
@@ -235,10 +260,10 @@ read-only on disk between bakes. `rebake` refreshes `golden-window` too once it 
 ### Proof for reviewers
 
 ```bash
-emulock evidence start emulator-5556 --label "PROJ-123 cart badge"
-emulock evidence shot  emulator-5556 "cart shows 2 items"
-emulock evidence note  emulator-5556 "tapped Add twice, badge went 1 → 2"
-emulock evidence stop  emulator-5556
+emuriad evidence start emulator-5556 --label "PROJ-123 cart badge"
+emuriad evidence shot  emulator-5556 "cart shows 2 items"
+emuriad evidence note  emulator-5556 "tapped Add twice, badge went 1 → 2"
+emuriad evidence stop  emulator-5556
 ```
 
 A screen recording in 3-minute parts, labelled screenshots, notes, the crash buffer,
@@ -249,19 +274,19 @@ lands in `.evidence/` in your repo (keep it gitignored; `start` warns if it is n
 
 ## Project config
 
-Nothing is required. A project that wants more adds `.emulock/` at its root:
+Nothing is required. A project that wants more adds `.emuriad/` at its root:
 
 ```
-.emulock/
+.emuriad/
   config            key = value settings, below
   pool-setup.sh     run on the device during `pool bake`: sign-in state, first-run flags, permissions
-  doctor.py         extra checks for `emulock doctor`: def checks(device, ctx) -> [Check]
+  doctor.py         extra checks for `emuriad doctor`: def checks(device, ctx) -> [Check]
 ```
 
 ```ini
-# .emulock/config
+# .emuriad/config
 package          = com.example.app.debug       # app the doctor and evidence look at
-package.release  = com.example.app             # variants: `emulock doctor <serial> release`
+package.release  = com.example.app             # variants: `emuriad doctor <serial> release`
 apk.glob         = app/build/outputs/apk/*/*/*.apk
 build.command    = ./gradlew :app:assembleDebug
 locale           = en-US                       # "any" to skip the check
@@ -271,18 +296,18 @@ pool.build       = ./gradlew :app:assembleDebug
 pool.verify      = lock boot dns locale notifications on-top
 ```
 
-Any key can be overridden from the environment: `pool.avd` is `EMULOCK_POOL_AVD`.
-`emulock pool --help` and `emulock doctor --help` list every key.
+Any key can be overridden from the environment: `pool.avd` is `EMURIAD_POOL_AVD`.
+`emuriad pool --help` and `emuriad doctor --help` list every key.
 
 `pool-setup.sh` and `doctor.py` are your repo's own code, run only when you run
 `pool bake` or `doctor` in that repo (`--no-project` skips the plugin). The guard never
 reads project files: it runs before every shell command, and a hook that executed a
 repo's scripts would run them in every project you open.
 
-## emulock-lab
+## emuriad-lab
 
 ```bash
-emulock-lab
+emuriad-lab
 ```
 
 A read-only dashboard on `127.0.0.1:7337`. It enumerates the lock store, asks adb what
@@ -329,7 +354,7 @@ gets a useful dashboard.
 | `EMULATOR_LOCK_TICKET_RE` | unset | regex whose first group is a ticket id in the branch name; unset shows no ticket |
 | `ANDROID_HOME` / `ANDROID_SDK_ROOT` | probed | SDK root |
 | `ANDROID_AVD_HOME` | `~/.android/avd` | AVD directory |
-| `EMULOCK_<KEY>` | unset | overrides a `.emulock/config` key (see Project config) |
+| `EMURIAD_<KEY>` | unset | overrides a `.emuriad/config` key (see Project config); the pre-0.3 `EMULOCK_<KEY>` still works |
 
 ## Harness support
 

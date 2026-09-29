@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# emulock-guard.sh — Claude Code PreToolUse hook (matcher: Bash).
+# emuriad-guard.sh — Claude Code PreToolUse hook (matcher: Bash).
 #
 # Refuses shell commands that touch emulator devices this session has not
-# claimed through `emulock`. Wire it in settings.json; commit that file and
+# claimed through `emuriad`. Wire it in settings.json; commit that file and
 # every contributor gets enforcement with no install step of their own.
 #
 #   deny  adb kill-server                     drops every agent's devices at once
@@ -13,10 +13,10 @@
 #   deny  pool boots whose window/-gpu flags do not match the snapshot (golden:
 #         headless, golden-window: windowed) — the emulator deletes the shared snapshot
 #   deny  gradlew install*/uninstall*/connected*  unless ANDROID_SERIAL names a lock we own
-#   deny  direct writes to the lock store     only `emulock` may manage it
+#   deny  direct writes to the lock store     only `emuriad` may manage it
 #   allow everything else — by staying silent (exit 0, no output), which defers
 #         to the harness's normal permission flow exactly as if this hook had
-#         not run at all. Device-agnostic adb, physical serials, `emulock`
+#         not run at all. Device-agnostic adb, physical serials, `emuriad`
 #         itself and unrelated commands all fall through here.
 #
 # On every allowed device command it refreshes the lock's lease (last_used) and
@@ -27,7 +27,7 @@
 #
 # Identity: Claude Code exposes a stable per-session id in the shell environment
 # (CLAUDE_CODE_SESSION_ID, also present as .session_id in this hook's stdin
-# payload). `emulock` reads the same variable, so the guard's notion of "this
+# payload). `emuriad` reads the same variable, so the guard's notion of "this
 # session" always matches what was recorded when the lock was claimed. Set
 # EMULATOR_LOCK_OWNER to give another harness a stable identity; without either,
 # identity falls back to manual:$USER and locks are advisory only.
@@ -45,8 +45,8 @@ JQ="$(command -v jq || echo /usr/bin/jq)"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 # The guard reads no project config (it runs before every command and must stay
-# cheap); a pool AVD is recognised by the marker `emulock pool bake` leaves in it.
-POOL_AVD_ENV="${EMULOCK_POOL_AVD:-${EMULATOR_POOL_AVD:-}}"
+# cheap); a pool AVD is recognised by the marker `emuriad pool bake` leaves in it.
+POOL_AVD_ENV="${EMURIAD_POOL_AVD:-${EMULOCK_POOL_AVD:-${EMULATOR_POOL_AVD:-}}}"
 
 INPUT="$(cat)"
 CMD="$("$JQ" -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null)" || exit 0
@@ -77,7 +77,7 @@ lock_avd() { sed -n 's/^AVD=//p' "$LOCK_ROOT/$1/meta" 2>/dev/null; }
 # have no business sitting in it.
 #
 # This goes into last_used, whose *content* was previously unused -- every
-# reader (emulock staleness, device-lab) keys off its mtime alone. So
+# reader (emuriad staleness, device-lab) keys off its mtime alone. So
 # the write is backward compatible and refreshes the lease in the same step.
 #
 # Matching is on the tool, never on a project's wrapper: `maestro test` is
@@ -223,7 +223,7 @@ touch_lease() {
 #
 # It reports a count, never a specific serial. Two agents refused in the same
 # instant would both be pointed at the same device and one would lose a race it
-# had just been promised. `emulock claim` does the atomic mkdir tie-break.
+# had just been promised. `emuriad claim` does the atomic mkdir tie-break.
 
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 
@@ -255,20 +255,20 @@ availability_hint() {
   done
 
   # The hook cannot see which emulators are running or which AVDs are free (that
-  # needs adb), so it never decides the machine is full: `emulock claim` does, and
+  # needs adb), so it never decides the machine is full: `emuriad claim` does, and
   # says so itself. What the lock store can add is how busy it is.
   if [[ "$held" -eq 0 ]]; then
-    echo "No other session holds a device — claim your own: emulock claim --pool (or emulock claim)"
+    echo "No other session holds a device — claim your own: emuriad claim --pool (or emuriad claim)"
   elif [[ "$expired" -gt 0 ]]; then
-    echo "$held held by other sessions, $expired with an expired lease and reclaimable now — claim your own: emulock claim --pool (or emulock claim)"
+    echo "$held held by other sessions, $expired with an expired lease and reclaimable now — claim your own: emuriad claim --pool (or emuriad claim)"
   elif [[ -n "$soonest" ]]; then
-    echo "$held held by other sessions; the earliest lease frees in $(human_secs "$soonest"). Claim your own: emulock claim --pool (or emulock claim) finds a free one, or says when none is left — then tell the user rather than taking a device that isn't yours."
+    echo "$held held by other sessions; the earliest lease frees in $(human_secs "$soonest"). Claim your own: emuriad claim --pool (or emuriad claim) finds a free one, or says when none is left — then tell the user rather than taking a device that isn't yours."
   else
-    echo "Claim a device first: emulock claim --pool (or emulock claim)"
+    echo "Claim a device first: emuriad claim --pool (or emuriad claim)"
   fi
 }
 
-CLAIM_HINT="Claim a device first: emulock claim --pool (or emulock claim). Check owners with: emulock status"
+CLAIM_HINT="Claim a device first: emuriad claim --pool (or emuriad claim). Check owners with: emuriad status"
 
 # require_owned <emulator-serial>: deny unless this session holds its lock,
 # otherwise refresh the lease. An owner-less lock predates the hook and gets a
@@ -323,10 +323,10 @@ if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])adb[[:space:]]+kill-server'; the
   deny "adb kill-server is forbidden — it disconnects every agent's devices at once. Retry 'adb -s <serial> wait-for-device' instead."
 fi
 
-# --- lock-store tampering: only emulock manages ~/.emulator-locks ---
-if echo "$SCMD" | grep -q '\.emulator-locks' && ! [[ "$SCMD" =~ ^[[:space:]]*([^[:space:]]*/)?emulock[[:space:]] ]]; then
+# --- lock-store tampering: only emuriad manages ~/.emulator-locks ---
+if echo "$SCMD" | grep -q '\.emulator-locks' && ! [[ "$SCMD" =~ ^[[:space:]]*([^[:space:]]*/)?(emuriad|emulock)[[:space:]] ]]; then
   if echo "$SCMD" | grep -qE '(^|[[:space:];&|(])(rm|mv|touch|mkdir|cp)[[:space:]]'; then
-    deny "Do not modify ~/.emulator-locks directly — use emulock (claim/release/reap)."
+    deny "Do not modify ~/.emulator-locks directly — use emuriad (claim/release/reap)."
   fi
 fi
 
@@ -338,15 +338,16 @@ fi
 # agent until a rebake. Only a boot that loads a snapshot (-read-only or
 # -snapshot) is held to this: the bake's own cold boot has neither. The flags
 # are read from the pool boot's own segment, comments removed, and this runs
-# before the emulock allow below so a boot chained after a claim is still
+# before the emuriad allow below so a boot chained after a claim is still
 # checked. ---
 join_continuations() { awk '{ if (sub(/\\$/, "")) printf "%s ", $0; else print }'; }
 has_flag() { # has_flag <text> <flag regex>: the flag as a whole word (-x, --x, -x=v)
   printf '%s\n' "$1" | grep -qE -- "(^|[[:space:]])$2([[:space:]=)]|\$)"
 }
-is_pool_avd() { # is_pool_avd <avd>: named by env, or marked by `emulock pool bake`
+is_pool_avd() { # is_pool_avd <avd>: named by env, or marked by `emuriad pool bake`
   [[ -n "$1" ]] || return 1
-  [[ "$1" == "$POOL_AVD_ENV" || -f "$AVD_HOME/$1.avd/emulock-pool" || -f "$AVD_HOME/$1.avd/golden.json" ]]
+  [[ "$1" == "$POOL_AVD_ENV" || -f "$AVD_HOME/$1.avd/emuriad-pool" || -f "$AVD_HOME/$1.avd/emulock-pool" \
+    || -f "$AVD_HOME/$1.avd/golden.json" ]]
 }
 boots="$(printf '%s\n' "$SCMD" | sed -E 's/(^|[[:space:]])#.*$//' | join_continuations \
   | sed -E 's/[0-9]*>&[0-9-]*//g; s/&>>?//g' | tr ';|&' '\n\n\n' \
@@ -361,21 +362,22 @@ while IFS= read -r boot; do
   if [[ "$boot_snapshot" == "golden-window" ]]; then
     # Saved from a windowed boot: a headless one, or any -gpu, cannot load it.
     if has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
-      deny "'golden-window' was saved from a boot WITH a window and the default GPU; adding -no-window or -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool --window for everyone until a rebake. Run the boot command from emulock claim --pool --window verbatim, or claim a headless one: emulock claim --pool."
+      deny "'golden-window' was saved from a boot WITH a window and the default GPU; adding -no-window or -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool --window for everyone until a rebake. Run the boot command from emuriad claim --pool --window verbatim, or claim a headless one: emuriad claim --pool."
     fi
   elif ! has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
-    deny "This pool snapshot is headless: '$boot_avd' boots from a snapshot saved with -no-window and the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emulock claim --pool verbatim. For a device someone can watch, release this claim and use emulock claim --pool --window (needs emulock pool bake --window once), or a named AVD: emulock claim --avd <name>."
+    deny "This pool snapshot is headless: '$boot_avd' boots from a snapshot saved with -no-window and the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emuriad claim --pool verbatim. For a device someone can watch, release this claim and use emuriad claim --pool --window (needs emuriad pool bake --window once), or a named AVD: emuriad claim --avd <name>."
   fi
 done <<<"$boots"
 
-# --- emulock itself: always allowed. Nothing to spoof-check here —
+# --- emuriad itself: always allowed. Nothing to spoof-check here —
 # nothing rewrites this command on its way here, so EMULATOR_LOCK_OWNER (if set
 # at all) comes from this session's own environment. ---
-# Only a command that IS one emulock call: `*emulock*` let anything through
-# that merely mentioned the word, such as `cd ~/src/emulock && adb -s <theirs> ...`.
-# Anything chained falls through to the checks below, which an emulock call passes.
-RE_EMULOCK_ONLY='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*([^[:space:];&|]*/)?emulock([[:space:]][^;&|]*)?$'
-if [[ "$SCMD" =~ $RE_EMULOCK_ONLY ]]; then
+# Only a command that IS one emuriad call: `*emuriad*` let anything through
+# that merely mentioned the word, such as `cd ~/src/emuriad && adb -s <theirs> ...`.
+# Anything chained falls through to the checks below, which an emuriad call passes.
+# emulock is the pre-rename name, a shim that runs emuriad.
+RE_EMURIAD_ONLY='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*([^[:space:];&|]*/)?(emuriad|emulock)([[:space:]][^;&|]*)?$'
+if [[ "$SCMD" =~ $RE_EMURIAD_ONLY ]]; then
   allow
 fi
 
@@ -422,7 +424,7 @@ fi
 if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])emulator[[:space:]]+[^;|&]*(@[A-Za-z0-9_.-]+|-avd[[:space:]]+[A-Za-z0-9_.-]+)'; then
   port="$(echo "$SCMD" | grep -oE -- '-port[[:space:]]+[0-9]+' | grep -oE '[0-9]+' | head -n1)"
   if [[ -z "$port" ]]; then
-    deny "Emulator launches must use the -port printed by emulock claim (a portless launch grabs an arbitrary port and collides with other agents). $CLAIM_HINT"
+    deny "Emulator launches must use the -port printed by emuriad claim (a portless launch grabs an arbitrary port and collides with other agents). $CLAIM_HINT"
   fi
   serial="emulator-$port"
   if [[ ! -d "$LOCK_ROOT/$serial" ]]; then
@@ -436,7 +438,7 @@ if echo "$SCMD" | grep -qE '(^|[/[:space:];&|(])emulator[[:space:]]+[^;|&]*(@[A-
   [[ -z "$launched_avd" ]] && launched_avd="$(echo "$SCMD" | grep -oE -- '-avd[[:space:]]+[A-Za-z0-9_.-]+' | awk '{print $2}' | head -n1)"
   locked_avd="$(lock_avd "$serial")"
   if [[ -n "$launched_avd" && -n "$locked_avd" && "$locked_avd" != "unknown" && "$launched_avd" != "$locked_avd" ]]; then
-    deny "Port $port is reserved for AVD '$locked_avd', not '$launched_avd'. Boot the AVD your claim printed, or reclaim: emulock reclaim"
+    deny "Port $port is reserved for AVD '$locked_avd', not '$launched_avd'. Boot the AVD your claim printed, or reclaim: emuriad reclaim"
   fi
   touch_lease "$serial"
 fi

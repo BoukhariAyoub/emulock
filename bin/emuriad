@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# emulock — machine-wide emulator reservations for parallel agents.
+# emuriad — machine-wide emulator reservations for parallel agents.
 #
 # Lock store: ~/.emulator-locks/ (shared by every agent/worktree on this machine)
 #   emulator-<port>/meta       one dir per device; mkdir is the atomic claim
@@ -17,27 +17,27 @@
 #                             harness at all). Distinct from the above, so it can
 #                             never collide with a real session.
 #
-# Enforcement — the guard hook (`emulock guard`) shares this lock store. Wired as
+# Enforcement — the guard hook (`emuriad guard`) shares this lock store. Wired as
 # a Claude Code PreToolUse hook, it hard-blocks adb/emulator/Gradle commands that
 # target serials the caller's session doesn't own, and refreshes the lease on
 # every allowed command. Without a hook the locks still coordinate but nothing
-# is blocked. `emulock init` wires it for you, once, after asking.
+# is blocked. `emuriad init` wires it for you, once, after asking.
 #
 # Usage:
-#   emulock claim --pool [--window] [--additional] [--note TEXT]   a disposable pool instance
-#   emulock claim [--avd NAME] [--require-booted] [--additional] [--note TEXT]
-#   emulock reclaim [--note TEXT]
-#   emulock release <serial> [--kill] [--force]
-#   emulock heartbeat <serial>
-#   emulock status
-#   emulock reap
-#   emulock pool status | bake [--window] [--apk PATH] | rebake    build the pool's golden snapshots
-#   emulock doctor                                      is emulock installed and enforced?
-#   emulock doctor <serial> [VARIANT] [--fix] [--json]  is this device ready to test on?
-#   emulock evidence start|shot|note|stop|render ...    record proof of an on-device test
-#   emulock init [--project] [--dry-run] [--yes]        install the skill and wire the guard
-#   emulock guard                                       the PreToolUse hook itself (stdin: payload)
-#   emulock version
+#   emuriad claim --pool [--window] [--additional] [--note TEXT]   a disposable pool instance
+#   emuriad claim [--avd NAME] [--require-booted] [--additional] [--note TEXT]
+#   emuriad reclaim [--note TEXT]
+#   emuriad release <serial> [--kill] [--force]
+#   emuriad heartbeat <serial>
+#   emuriad status
+#   emuriad reap
+#   emuriad pool status | bake [--window] [--apk PATH] | rebake    build the pool's golden snapshots
+#   emuriad doctor                                      is emuriad installed and enforced?
+#   emuriad doctor <serial> [VARIANT] [--fix] [--json]  is this device ready to test on?
+#   emuriad evidence start|shot|note|stop|render ...    record proof of an on-device test
+#   emuriad init [--project] [--dry-run] [--yes]        install the skill and wire the guard
+#   emuriad guard                                       the PreToolUse hook itself (stdin: payload)
+#   emuriad version
 #
 # Multi-device claims: plain `claim` is one-device-per-owner by default (the
 # "already held" short-circuit below) -- a convenience default, not a security
@@ -51,7 +51,7 @@
 # never re-run an old `-port 5554` command; that port may boot a different AVD.
 #
 # The pool: `claim --pool` hands out a read-only instance of one AVD booted
-# from its `golden` snapshot (`emulock pool bake` makes it). `-read-only` lets
+# from its `golden` snapshot (`emuriad pool bake` makes it). `-read-only` lets
 # several instances share the AVD and never saves back, so every instance
 # starts identical and nothing an agent does survives it. That is why pool
 # claims take no AVD lock, why `reclaim` of a pool lock takes ANY instance, and
@@ -62,7 +62,7 @@
 #
 # Headless by default. A snapshot only loads under the display setup it was
 # saved with, so a device someone can watch needs its own snapshot:
-# `emulock pool bake --window` saves `golden-window` from a windowed boot, and
+# `emuriad pool bake --window` saves `golden-window` from a windowed boot, and
 # `claim --pool --window` boots from it with a window. Each snapshot refuses
 # the other mode (the emulator deletes a snapshot it cannot load; the guard
 # refuses the mismatched boot, and both are read-only on disk).
@@ -74,11 +74,13 @@
 # "Activity" = last_used mtime, refreshed by the guard hook whenever the owning
 # session touches the device. An agent actively using its emulator is never reaped.
 #
-# Project config: <repo>/.emulock/config, `key = value` lines, read from the git
+# Project config: <repo>/.emuriad/config, `key = value` lines, read from the git
 # checkout of the current directory. Every key can be overridden by an
-# EMULOCK_<KEY> variable (dots become underscores: pool.avd -> EMULOCK_POOL_AVD).
+# EMURIAD_<KEY> variable (dots become underscores: pool.avd -> EMURIAD_POOL_AVD).
+# The pre-rename names still work: .emulock/ when there is no .emuriad/, and
+# EMULOCK_<KEY> when EMURIAD_<KEY> is unset.
 # The keys that matter here: pool.avd (default emulock_pool), pool.max (3).
-# `emulock pool --help` and `emulock doctor --help` list the rest.
+# `emuriad pool --help` and `emuriad doctor --help` list the rest.
 #
 # Environment:
 #   EMULATOR_LOCK_OWNER     owner identity override
@@ -91,7 +93,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.2"
+VERSION="0.3.0"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 BOOT_GRACE=600
@@ -110,7 +112,7 @@ POOL_SNAPSHOT="golden"
 POOL_SNAPSHOT_WINDOW="golden-window"
 DRY_RUN=0
 
-die() { echo "emulock: $*" >&2; exit 1; }
+die() { echo "emuriad: $*" >&2; exit 1; }
 # Print the header comment block as help. Reads to the end of the block rather
 # than a fixed line range, so the help never silently loses what the header gains.
 usage() { awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; }
@@ -143,22 +145,28 @@ first_existing() {
 }
 # Repo checkout, Homebrew (pkgshare), then where install.sh links to.
 share_path() { # share_path <relative path under the share dir>
-  first_existing "$HERE/../$1" "$HERE/../share/emulock/$1" "$HOME/.local/share/emulock/$1"
+  first_existing "$HERE/../$1" "$HERE/../share/emuriad/$1" "$HOME/.local/share/emuriad/$1"
 }
-guard_path() { share_path hooks/claude-code/emulock-guard.sh; }
+guard_path() { share_path hooks/claude-code/emuriad-guard.sh; }
 libexec_path() { first_existing "$HERE/../libexec/$1"; }
 
 # --- project config -------------------------------------------------------------
 
 project_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
 
-# conf_get <key> [default]: EMULOCK_<KEY> env, else <repo>/.emulock/config, else default.
+# The project's config directory: .emuriad/, or .emulock/ from before the rename.
+conf_dir() { # conf_dir <root>
+  if [[ ! -d "$1/.emuriad" && -d "$1/.emulock" ]]; then printf '%s' "$1/.emulock"; else printf '%s' "$1/.emuriad"; fi
+}
+
+# conf_get <key> [default]: EMURIAD_<KEY> env (or the old EMULOCK_<KEY>), else the
+# project's config file, else default.
 conf_get() {
   local key="$1" def="${2:-}" env_name val="" file
-  env_name="EMULOCK_$(printf '%s' "$key" | tr '[:lower:].-' '[:upper:]__')"
-  val="${!env_name:-}"
+  env_name="$(printf '%s' "$key" | tr '[:lower:].-' '[:upper:]__')"
+  val="$(printenv "EMURIAD_$env_name" || printenv "EMULOCK_$env_name" || true)"
   if [[ -z "$val" ]]; then
-    file="$(project_root)/.emulock/config"
+    file="$(conf_dir "$(project_root)")/config"
     if [[ -f "$file" ]]; then
       val="$(awk -v k="$key" '
         { line = $0; sub(/^[ \t]+/, "", line) }
@@ -250,12 +258,13 @@ avd_of_serial() { # AVD name of a running emulator (best effort)
   adb -s "$1" emu avd name 2>/dev/null | head -n1 | tr -d '\r' || true
 }
 
-# A pool AVD is one `emulock pool bake` created or baked (it leaves a marker in
-# the AVD directory), or the one this project's config names. Plain claims never
+# A pool AVD is one `emuriad pool bake` created or baked (it leaves a marker in
+# the AVD directory; emulock-pool before the rename), or the one this project's config names. Plain claims never
 # take one, and a pool instance left running with no lock is shut down by reap.
 is_pool_avd() { # is_pool_avd <avd>
   [[ -n "$1" ]] || return 1
-  [[ "$1" == "$POOL_AVD" || -f "$AVD_HOME/$1.avd/emulock-pool" || -f "$AVD_HOME/$1.avd/golden.json" ]]
+  [[ "$1" == "$POOL_AVD" || -f "$AVD_HOME/$1.avd/emuriad-pool" || -f "$AVD_HOME/$1.avd/emulock-pool" \
+    || -f "$AVD_HOME/$1.avd/golden.json" ]]
 }
 
 is_stale() { # is_stale <serial> — 0 = stale
@@ -427,13 +436,13 @@ avds_in_use() { # AVDs held by locks or running emulators
 
 print_boot_hint() { # print_boot_hint <serial> <avd>
   echo "identity is AVD $2 — do not relaunch by port; next boot may be a different serial"
-  echo "relaunch after crash: emulock reclaim"
+  echo "relaunch after crash: emuriad reclaim"
   echo "use it as: adb -s $1 ..."
 }
 
 print_pool_hint() { # print_pool_hint <serial>
   echo "pool instances are identical and disposable: nothing you change survives, and after a crash any instance will do"
-  echo "relaunch after crash: emulock reclaim"
+  echo "relaunch after crash: emuriad reclaim"
   echo "use it as: adb -s $1 ..."
 }
 
@@ -447,11 +456,11 @@ next_free_hint() {
     [[ -d "$d" ]] || continue
     idle="$(lease_age "${d##*/}")"
     [[ -z "$idle" ]] && continue
-    [[ "$idle" -ge "$IDLE_TTL" ]] && { echo "A lease has already expired — run: emulock reap, then claim again."; return 0; }
+    [[ "$idle" -ge "$IDLE_TTL" ]] && { echo "A lease has already expired — run: emuriad reap, then claim again."; return 0; }
     left=$(( IDLE_TTL - idle ))
     if [[ -z "$soonest" || "$left" -lt "$soonest" ]]; then soonest="$left"; fi
   done
-  [[ -z "$soonest" ]] && { echo "Run: emulock status"; return 0; }
+  [[ -z "$soonest" ]] && { echo "Run: emuriad status"; return 0; }
   h=$(( soonest / 3600 )); m=$(( (soonest % 3600) / 60 ))
   if [[ "$h" -gt 0 ]]; then
     echo "The earliest lease frees in ${h}h ${m}m. Tell the user rather than taking a device that isn't yours."
@@ -478,7 +487,7 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
   # turned into it: the display is fixed at boot.
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial" \
     && [[ "$(pool_snapshot_of "$our_serial")" != "$snapshot" ]] && adb_all_serials | grep -qx "$our_serial"; then
-    die "claim --pool: you hold $our_serial, booted from '$(pool_snapshot_of "$our_serial")' — release it first (emulock release $our_serial), or keep it and add this one with --additional"
+    die "claim --pool: you hold $our_serial, booted from '$(pool_snapshot_of "$our_serial")' — release it first (emuriad release $our_serial), or keep it and add this one with --additional"
   fi
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial"; then
     if adb_booted_serials | grep -qx "$our_serial"; then
@@ -493,7 +502,7 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
       echo "use it as: adb -s $our_serial wait-for-device"
       return 0
     fi
-    echo "emulock: pool instance $our_serial is gone; claiming a fresh one" >&2
+    echo "emuriad: pool instance $our_serial is gone; claiming a fresh one" >&2
     if [[ "$DRY_RUN" == 1 ]]; then
       echo "[dry-run] would drop dead lock $our_serial"
     else
@@ -505,8 +514,8 @@ claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
 
   # Always a fresh boot from the snapshot (seconds), within the cap.
   if ! pool_snapshot_ready "$snapshot"; then
-    [[ "$window" == 1 ]] && die "claim --pool --window: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first (a window opens for a few minutes): emulock pool bake --window"
-    die "claim --pool: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first: emulock pool bake"
+    [[ "$window" == 1 ]] && die "claim --pool --window: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first (a window opens for a few minutes): emuriad pool bake --window"
+    die "claim --pool: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first: emuriad pool bake"
   fi
   in_use="$(pool_lock_count)"
   (( in_use < POOL_MAX )) || die "claim --pool: the pool is full ($in_use/$POOL_MAX). $(next_free_hint)"
@@ -596,7 +605,7 @@ cmd_claim() {
       want_avd="$our_avd"
     fi
     released_avd="$our_avd"
-    echo "emulock: $our_serial is gone; reclaiming AVD ${want_avd:-?} (port may change)" >&2
+    echo "emuriad: $our_serial is gone; reclaiming AVD ${want_avd:-?} (port may change)" >&2
     if [[ "$DRY_RUN" == 1 ]]; then
       echo "[dry-run] would drop dead lock $our_serial and boot AVD ${want_avd:-?}"
     else
@@ -668,7 +677,7 @@ cmd_claim() {
     avd="$want_avd"
   else
     for candidate in $("$EMU_BIN" -list-avds 2>/dev/null); do
-      is_pool_avd "$candidate" && continue   # only `emulock pool bake` boots it writable, by name
+      is_pool_avd "$candidate" && continue   # only `emuriad pool bake` boots it writable, by name
       echo "$used_avds" | grep -qx "$candidate" && continue
       if [[ "$DRY_RUN" == 1 ]]; then avd="$candidate"; break; fi
       # mkdir on the AVD lock is the atomic tie-break between concurrent claims.
@@ -683,7 +692,7 @@ cmd_claim() {
   if [[ "$DRY_RUN" == 1 ]]; then
     echo "[dry-run] would claim: $serial (boot needed, avd: $avd)"
     echo "[dry-run] boot command: $(boot_command "$avd" "$port")"
-    echo "[dry-run] identity is AVD $avd — relaunch with: emulock reclaim"
+    echo "[dry-run] identity is AVD $avd — relaunch with: emuriad reclaim"
     return 0
   fi
 
@@ -707,7 +716,7 @@ cmd_reclaim() {
   mkdir -p "$LOCK_ROOT"
   local our_serial avd
   our_serial="$(find_our_lock)"
-  [[ -n "$our_serial" ]] || die "reclaim: this session has no prior claim. Use: emulock claim [--pool | --avd NAME]"
+  [[ -n "$our_serial" ]] || die "reclaim: this session has no prior claim. Use: emuriad claim [--pool | --avd NAME]"
   if is_pool_lock "$our_serial"; then
     echo "reclaiming a pool instance (previous serial $our_serial; any instance will do)"
     if [[ "$(pool_snapshot_of "$our_serial")" == "$POOL_SNAPSHOT_WINDOW" ]]; then
@@ -811,7 +820,7 @@ cmd_status() {
     printf '%-16s %-24s %-30s %-10s %-8s %s\n' "$serial" "$avd" "-" "-" "-" "$state"
   done
   if [[ -d "$AVD_HOME/$POOL_AVD.avd" ]]; then
-    local snap="missing — emulock pool bake" window=""
+    local snap="missing — emuriad pool bake" window=""
     pool_snapshot_ready && snap="ready"
     pool_snapshot_ready "$POOL_SNAPSHOT_WINDOW" && window=" · '$POOL_SNAPSHOT_WINDOW' ready (claim --pool --window)"
     echo "agent pool: $(pool_lock_count)/$POOL_MAX claimed · AVD $POOL_AVD · snapshot '$POOL_SNAPSHOT' $snap$window"
@@ -826,24 +835,27 @@ cmd_reap() {
 
 # --- doctor (install) -----------------------------------------------------------
 
-# Where the guard is wired, if anywhere: a settings.json that mentions emulock,
-# or one that runs a project hook script which itself calls `emulock guard`.
+# Where the guard is wired, if anywhere: a settings.json that mentions emuriad,
+# or one that runs a project hook script which itself calls `emuriad guard`.
+# emulock is the pre-rename name, still wired through the shim.
+RE_WIRED='(emuriad|emulock)-guard\.sh|(emuriad|emulock)[^"]* guard'
+RE_WIRED_HOOK='(emuriad|emulock)[^[:space:]]* guard|(emuriad|emulock)-guard\.sh'
 guard_wired_in() {
   local dir="$PWD" f hook_dir
   while [[ "$dir" != "/" ]]; do
     for f in "$dir/.claude/settings.json" "$dir/.claude/settings.local.json"; do
       [[ -f "$f" ]] || continue
-      if grep -qE 'emulock-guard\.sh|emulock[^"]* guard' "$f" 2>/dev/null; then echo "$f"; return 0; fi
+      if grep -qE "$RE_WIRED" "$f" 2>/dev/null; then echo "$f"; return 0; fi
       hook_dir="$dir/.claude/hooks"
       if grep -q '\.claude/hooks/' "$f" 2>/dev/null && [[ -d "$hook_dir" ]] \
-        && grep -lqE 'emulock[^[:space:]]* guard|emulock-guard\.sh' "$hook_dir"/* 2>/dev/null; then
+        && grep -lqE "$RE_WIRED_HOOK" "$hook_dir"/* 2>/dev/null; then
         echo "$f (through a hook in $hook_dir)"; return 0
       fi
     done
     dir="$(dirname "$dir")"
   done
   for f in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json"; do
-    [[ -f "$f" ]] && grep -qE 'emulock-guard\.sh|emulock[^"]* guard' "$f" 2>/dev/null && { echo "$f"; return 0; }
+    [[ -f "$f" ]] && grep -qE "$RE_WIRED" "$f" 2>/dev/null && { echo "$f"; return 0; }
   done
   return 1
 }
@@ -856,7 +868,7 @@ cmd_doctor_install() {
   good() { say "ok  " "$1"; }
   warn() { problems=$((problems + 1)); say "WARN" "$1"; }
 
-  echo "emulock doctor ($VERSION)"
+  echo "emuriad doctor ($VERSION)"
   echo
 
   # jq first: it is the one missing dependency that fails *silently*. The guard
@@ -874,7 +886,7 @@ cmd_doctor_install() {
              Debian: sudo apt install jq"
   fi
 
-  command -v python3 >/dev/null 2>&1 && good "python3 found" || warn "python3 not on PATH (needed by doctor <serial>, evidence and emulock-lab)"
+  command -v python3 >/dev/null 2>&1 && good "python3 found" || warn "python3 not on PATH (needed by doctor <serial>, evidence and emuriad-lab)"
   command -v adb >/dev/null 2>&1 && good "adb found" || warn "adb not on PATH — install Android platform-tools"
   [[ -d "$SDK" ]] && good "Android SDK at $SDK" || warn "no SDK at $SDK — set ANDROID_HOME"
 
@@ -895,7 +907,7 @@ cmd_doctor_install() {
   local guard="" wired=""
   guard="$(guard_path || true)"
   if [[ -z "$guard" ]]; then
-    warn "guard hook not found — reinstall emulock"
+    warn "guard hook not found — reinstall emuriad"
   elif [[ ! -x "$guard" ]]; then
     warn "guard found but not executable: chmod +x '$guard'"
   else
@@ -904,20 +916,24 @@ cmd_doctor_install() {
       good "wired into $wired"
     else
       warn "guard is NOT wired into any settings.json above $PWD or in ~/.claude.
-         Locks are advisory until it is. Run this yourself — emulock asks before it
+         Locks are advisory until it is. Run this yourself — emuriad asks before it
          edits a settings file, and an agent should not do it for you:
 
-             emulock init"
+             emuriad init"
     fi
   fi
 
-  if [[ -f "$(project_root)/.emulock/config" ]]; then
-    good "project config: $(project_root)/.emulock/config"
+  local conf; conf="$(conf_dir "$(project_root)")/config"
+  if [[ -f "$conf" ]]; then
+    case "$conf" in
+      */.emulock/config) good "project config: $conf (pre-rename name; git mv .emulock .emuriad when convenient)" ;;
+      *) good "project config: $conf" ;;
+    esac
   fi
 
   echo
   if (( problems )); then
-    echo "$problems issue(s). emulock still coordinates, but nothing is enforced"
+    echo "$problems issue(s). emuriad still coordinates, but nothing is enforced"
     echo "until the warnings above are resolved."
     return 1
   fi
@@ -926,13 +942,13 @@ cmd_doctor_install() {
 }
 
 cmd_doctor() {
-  # No serial: is emulock itself installed and enforced? A serial: is this device ready?
+  # No serial: is emuriad itself installed and enforced? A serial: is this device ready?
   if [[ $# -eq 0 ]]; then
     cmd_doctor_install
     return
   fi
   local py
-  py="$(libexec_path emulock_doctor.py)" || die "doctor: libexec/emulock_doctor.py is missing — reinstall emulock"
+  py="$(libexec_path emuriad_doctor.py)" || die "doctor: libexec/emuriad_doctor.py is missing — reinstall emuriad"
   exec python3 "$py" "$@"
 }
 
@@ -940,25 +956,25 @@ cmd_doctor() {
 
 cmd_pool() {
   local sh
-  sh="$(libexec_path emulock-pool.sh)" || die "pool: libexec/emulock-pool.sh is missing — reinstall emulock"
-  EMULOCK_BIN="$SELF" EMULOCK_DRY_RUN="$DRY_RUN" exec /bin/bash "$sh" "$@"
+  sh="$(libexec_path emuriad-pool.sh)" || die "pool: libexec/emuriad-pool.sh is missing — reinstall emuriad"
+  EMURIAD_BIN="$SELF" EMURIAD_DRY_RUN="$DRY_RUN" exec /bin/bash "$sh" "$@"
 }
 
 cmd_evidence() {
   local py
-  py="$(libexec_path emulock_evidence.py)" || die "evidence: libexec/emulock_evidence.py is missing — reinstall emulock"
+  py="$(libexec_path emuriad_evidence.py)" || die "evidence: libexec/emuriad_evidence.py is missing — reinstall emuriad"
   exec python3 "$py" "$@"
 }
 
 cmd_init() {
   local py invoked skill
-  py="$(libexec_path emulock_init.py)" || die "init: libexec/emulock_init.py is missing — reinstall emulock"
-  # Link the skill through the path emulock was invoked by, when that has a share
-  # dir (Homebrew: /opt/homebrew/share/emulock). The resolved path is versioned
-  # (Cellar/emulock/0.2.0/...), and an upgrade would leave the link dangling.
+  py="$(libexec_path emuriad_init.py)" || die "init: libexec/emuriad_init.py is missing — reinstall emuriad"
+  # Link the skill through the path emuriad was invoked by, when that has a share
+  # dir (Homebrew: /opt/homebrew/share/emuriad). The resolved path is versioned
+  # (Cellar/emuriad/0.2.0/...), and an upgrade would leave the link dangling.
   invoked="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  skill="$(first_existing "$invoked/../share/emulock/skills/emulock" || share_path skills/emulock || true)"
-  EMULOCK_BIN="$SELF" EMULOCK_SKILL_DIR="$skill" exec python3 "$py" "$@"
+  skill="$(first_existing "$invoked/../share/emuriad/skills/emuriad" || share_path skills/emuriad || true)"
+  EMURIAD_BIN="$SELF" EMURIAD_SKILL_DIR="$skill" exec python3 "$py" "$@"
 }
 
 main() {
@@ -981,7 +997,7 @@ main() {
   for a in "$@"; do
     case "$a" in
     --help|-h) usage; exit 0 ;;
-    --version) echo "emulock $VERSION"; exit 0 ;;
+    --version) echo "emuriad $VERSION"; exit 0 ;;
     --dry-run) DRY_RUN=1 ;;
     *) args+=("$a") ;;
     esac
@@ -991,7 +1007,7 @@ main() {
   [[ -n "$cmd" ]] || { usage; exit 1; }
   shift
   case "$cmd" in
-  version) echo "emulock $VERSION"; return 0 ;;
+  version) echo "emuriad $VERSION"; return 0 ;;
   doctor) cmd_doctor "$@"; return ;;
   esac
   require_adb

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""emulock evidence: record proof of an on-device test, for the people reviewing the change.
+"""emuriad evidence: record proof of an on-device test, for the people reviewing the change.
 
 When an agent tests on a (virtual) phone, the only record is usually its own word,
 and reviewers ask for more ("did you run it on a device? I didn't see it"). This
 captures what they would want to see, while the agent works:
 
   start  records the screen (low bit rate, 3-minute parts), clears logcat, runs the
-         pre-flight (emulock doctor) so a broken device shows up before testing
+         pre-flight (emuriad doctor) so a broken device shows up before testing
   shot   a full screenshot with a label ("cart shows 1 item")
   note   one line of what the agent did or checked, in its own words
   stop   pulls the video, collects warnings and the crash buffer, runs the pre-flight
@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import emulock_common as common  # noqa: E402
+import emuriad_common as common  # noqa: E402
 
 REPO_ROOT = Path.cwd()
 CONFIG = common.Config(REPO_ROOT, values={})
@@ -48,11 +48,13 @@ def use_worktree(root: Path) -> None:
     global REPO_ROOT, CONFIG, EVIDENCE_ROOT
     REPO_ROOT = common.project_root(root).resolve()
     CONFIG = common.Config(REPO_ROOT)
-    EVIDENCE_ROOT = Path(os.environ.get("EMULOCK_EVIDENCE_DIR")
+    EVIDENCE_ROOT = Path(os.environ.get("EMURIAD_EVIDENCE_DIR")
+                         or os.environ.get("EMULOCK_EVIDENCE_DIR")
                          or os.environ.get("DEVICE_EVIDENCE_DIR")
                          or REPO_ROOT / CONFIG.get("evidence.dir", ".evidence"))
 # Tests swap in a fake doctor script; normally the doctor runs in-process.
-DOCTOR = os.environ.get("EMULOCK_EVIDENCE_DOCTOR") or os.environ.get("DEVICE_EVIDENCE_DOCTOR")
+DOCTOR = (os.environ.get("EMURIAD_EVIDENCE_DOCTOR") or os.environ.get("EMULOCK_EVIDENCE_DOCTOR")
+          or os.environ.get("DEVICE_EVIDENCE_DOCTOR"))
 DEVICE_DIR = "/sdcard/evidence"
 BIT_RATE = 1_500_000          # ~11 MB a minute: small enough to attach
 PART_SECONDS = 180            # screenrecord's own ceiling per file
@@ -63,7 +65,7 @@ CONTENT_TYPES = {".png": "image/png", ".mp4": "video/mp4", ".txt": "text/plain",
 
 
 def die(message: str) -> None:
-    print(f"emulock evidence: {message}", file=sys.stderr)
+    print(f"emuriad evidence: {message}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -114,7 +116,7 @@ def pointer(serial: str) -> Path:
 def active(serial: str) -> Path:
     path = pointer(serial)
     if not path.is_file():
-        die(f"nothing is being recorded on {serial} — start with: emulock evidence start {serial}")
+        die(f"nothing is being recorded on {serial} — start with: emuriad evidence start {serial}")
     folder = Path(path.read_text().strip())
     try:
         use_worktree(Path(json.loads((folder / "session.json").read_text())["worktree"]))
@@ -143,8 +145,8 @@ def run_doctor(serial: str, package: str, variant: str) -> dict:
                     "--json", "--worktree", str(REPO_ROOT)]
             out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
             return json.loads(out.stdout)
-        import emulock_doctor
-        return emulock_doctor.report(serial, variant or None, package or None, REPO_ROOT)
+        import emuriad_doctor
+        return emuriad_doctor.report(serial, variant or None, package or None, REPO_ROOT)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, Exception):  # noqa: BLE001
         return {"checks": [], "error": "pre-flight did not run"}
 
@@ -159,7 +161,7 @@ def problems(report: dict) -> list[dict]:
 def start(serial: str, label: str, package: str, variant: str, video: bool) -> None:
     require_device(serial)
     if pointer(serial).exists():
-        die(f"already recording on {serial} — stop it first: emulock evidence stop {serial}")
+        die(f"already recording on {serial} — stop it first: emuriad evidence stop {serial}")
     warning = not_ignored_warning()
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
@@ -186,7 +188,7 @@ def start(serial: str, label: str, package: str, variant: str, video: bool) -> N
     for issue in problems(report):
         print(f"pre-flight {issue['status']}: {issue['name']} — {issue['detail']}")
     print(f"recording {serial}{' (screen + logs)' if video else ' (logs only)'} → {folder}")
-    print(f"next: emulock evidence shot {serial} \"<what it shows>\" · note {serial} \"<what you checked>\" · "
+    print(f"next: emuriad evidence shot {serial} \"<what it shows>\" · note {serial} \"<what you checked>\" · "
           f"stop {serial}")
 
 
@@ -238,7 +240,7 @@ def stop(serial: str) -> None:
     pointer(serial).unlink()
     print(f"evidence ready in {folder}")
     print("post it: upload each file in manifest.json where reviewers look, then "
-          f"emulock evidence render {folder} --assets <urls.json> and paste the result")
+          f"emuriad evidence render {folder} --assets <urls.json> and paste the result")
 
 
 def duration(session: dict) -> str:
@@ -285,7 +287,7 @@ def summary(folder: Path, session: dict, report: dict, crashes: str) -> str:
     if session.get("parts"):
         links = " · ".join(f"[{p}]({{{{asset:{p}}}}})" for p in session["parts"])
         lines += ["", f"**Screen recording:** {links}"]
-    lines += ["", "---", "Captured with `emulock evidence`; warnings.txt and crashes.txt are "
+    lines += ["", "---", "Captured with `emuriad evidence`; warnings.txt and crashes.txt are "
                          "in the evidence folder."]
     return "\n".join(lines) + "\n"
 
@@ -311,17 +313,17 @@ def render(folder: Path, assets_path: Path | None) -> None:
     for name, url in assets.items():
         text = text.replace(f"{{{{asset:{name}}}}}", url)
     if missing:
-        print(f"emulock evidence: no URL for {', '.join(missing)} — left as placeholders", file=sys.stderr)
+        print(f"emuriad evidence: no URL for {', '.join(missing)} — left as placeholders", file=sys.stderr)
     print(text, end="")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="emulock evidence", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="emuriad evidence", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("start", help="begin recording a claimed device")
     p.add_argument("serial")
     p.add_argument("--label", default="", help="what is being verified, e.g. 'PROJ-1234 cart badge'")
-    p.add_argument("--variant", default="", help="a variant from .emulock/config (package.<variant>)")
+    p.add_argument("--variant", default="", help="a variant from .emuriad/config (package.<variant>)")
     p.add_argument("--package", default="", help="app id, instead of the configured one")
     p.add_argument("--no-video", action="store_true", help="screenshots, notes and logs only")
     p.add_argument("--worktree", type=Path, default=None,

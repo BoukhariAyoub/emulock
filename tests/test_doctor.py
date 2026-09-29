@@ -1,4 +1,4 @@
-"""Tests for `emulock doctor <serial>` against a fake adb.
+"""Tests for `emuriad doctor <serial>` against a fake adb.
 
 Run: python3 tests/test_doctor.py   (no pytest needed; tests/run.sh runs it too)
 
@@ -24,8 +24,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "libexec"))
-import emulock_common as common  # noqa: E402
-import emulock_doctor as doctor  # noqa: E402
+import emuriad_common as common  # noqa: E402
+import emuriad_doctor as doctor  # noqa: E402
 
 SERIAL = "emulator-5599"
 PKG = "com.example.app"
@@ -189,7 +189,7 @@ class DoctorTest(unittest.TestCase):
         by_name, *_ = self.run_doctor(**{"emu avd name": "agent_pool\nOK"})
         self.assertEqual("warn", by_name["golden"].status)
         self.assertIn("10 days old", by_name["golden"].detail)
-        self.assertIn("emulock pool rebake", by_name["golden"].fix)
+        self.assertIn("emuriad pool rebake", by_name["golden"].fix)
 
     def test_without_a_record_the_snapshot_age_counts(self):
         self.pool_instance(baked_days_ago=9, record=False)
@@ -203,7 +203,7 @@ class DoctorTest(unittest.TestCase):
         by_name, *_ = self.run_doctor(**{"emu avd name": "agent_pool\nOK"})
         self.assertEqual("warn", by_name["golden"].status)  # only golden exists on disk
         self.assertIn("'golden-window'", by_name["golden"].detail)
-        self.assertEqual("emulock pool bake --window", by_name["golden"].fix)
+        self.assertEqual("emuriad pool bake --window", by_name["golden"].fix)
 
     def test_a_named_avd_gets_no_golden_check(self):
         by_name, *_ = self.run_doctor()
@@ -363,14 +363,14 @@ class DoctorTest(unittest.TestCase):
     # --- project checks ---------------------------------------------------------------
 
     def write_plugin(self, body: str) -> Path:
-        path = self.repo / ".emulock" / "doctor.py"
+        path = self.repo / ".emuriad" / "doctor.py"
         path.parent.mkdir(exist_ok=True)
         path.write_text(body)
         return path
 
     def test_a_project_plugin_adds_its_checks_before_host_load(self):
         plugin = self.write_plugin(
-            "from emulock_doctor import Check, WARN\n"
+            "from emuriad_doctor import Check, WARN\n"
             "def checks(device, ctx):\n"
             "    focus = device.shell('dumpsys window')\n"
             "    return [Check('tutorial', WARN, f'{ctx.package} api {ctx.api}: ' + ('main' if 'Main' in focus else '?'))]\n")
@@ -386,7 +386,7 @@ class DoctorTest(unittest.TestCase):
         self.assertIn("dns", by_name)
 
     def test_a_missing_plugin_is_fine(self):
-        by_name, *_ = self.run_doctor(plugin=self.repo / ".emulock" / "doctor.py")
+        by_name, *_ = self.run_doctor(plugin=self.repo / ".emuriad" / "doctor.py")
         self.assertNotIn("project", by_name)
 
     # --- modes ------------------------------------------------------------------------

@@ -23,10 +23,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-GUARD="$ROOT/hooks/claude-code/emulock-guard.sh"
-LOCK="$ROOT/bin/emulock"
+GUARD="$ROOT/hooks/claude-code/emuriad-guard.sh"
+LOCK="$ROOT/bin/emuriad"
 LAB="$ROOT/libexec/device_lab.py"
-POOL_SH="$ROOT/libexec/emulock-pool.sh"
+POOL_SH="$ROOT/libexec/emuriad-pool.sh"
 
 PASS=0
 FAIL=0
@@ -121,7 +121,8 @@ test_guard() {
   is "portless emulator launch denied"  "$(dec "emulator @some_avd")"       deny
   is "non-device command untouched"     "$(dec "git status")"               allow
   is "unit tests untouched"             "$(dec "./gradlew testDebugUnitTest")" allow
-  is "lock script itself allowed"       "$(dec "emulock status")"  allow
+  is "lock script itself allowed"       "$(dec "emuriad status")"  allow
+  is "pre-rename emulock shim allowed"  "$(dec "emulock status")"  allow
   is "direct lock-store writes denied"  "$(dec "rm -rf ~/.emulator-locks/emulator-5599")" deny
 
   group "guard: prose must not trip enforcement"
@@ -199,7 +200,7 @@ except Exception: print("")'
   mk_lock emulator-5599 600
   mk_lock emulator-5601 9240
   hint="$(ask_hint)"
-  has "a busy store still sends you to claim" "$hint" "Claim your own: emulock claim"
+  has "a busy store still sends you to claim" "$hint" "Claim your own: emuriad claim"
   has "...says when a lease frees"             "$hint" "frees in"
   has "...and not to take someone else's"      "$hint" "tell the user rather than taking"
 
@@ -220,7 +221,7 @@ except Exception: print("")'
 
   # Never name a serial: two agents refused at once would race for it.
   case "$hint" in
-    *"emulock claim emulator-"*|*"claim emulator-5"*)
+    *"emuriad claim emulator-"*|*"claim emulator-5"*)
       bad "hint never names a specific serial" "a count, not a serial" "$hint" ;;
     *) ok "hint never names a specific serial" ;;
   esac
@@ -230,7 +231,7 @@ except Exception: print("")'
   # A hook that cannot parse its input must allow, not deny: denying on its own
   # breakage would block every shell command on the machine with no way to
   # repair it. The cost is that enforcement disappears silently, which is why
-  # `emulock doctor` checks for jq explicitly.
+  # `emuriad doctor` checks for jq explicitly.
   local nojq_probe nojq_out
   nojq_probe="$(mktemp -d)"
   sed 's|^JQ=.*|JQ="/nonexistent/jq"|' "$GUARD" >"$nojq_probe/guard.sh"
@@ -301,7 +302,7 @@ PY
 # =============================================================================
 test_lock() {
   setup_store
-  group "emulock"
+  group "emuriad"
   local out
   out="$(EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" "$LOCK" status 2>&1)"
   has "status lists a claimed serial" "$out" "$MINE"
@@ -311,7 +312,7 @@ test_lock() {
   out="$(EMULATOR_LOCK_DIR="$STORE" "$LOCK" bogus-subcommand 2>&1)"
   has "unknown subcommand is rejected" "$out" "unknown command"
 
-  group "emulock doctor (read-only diagnostics)"
+  group "emuriad doctor (read-only diagnostics)"
   local probe; probe="$(mktemp -d)"
   out="$(cd "$probe" && HOME="$probe" EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
          "$LOCK" doctor 2>&1)"
@@ -333,7 +334,7 @@ test_lock() {
 
   # ...and must detect a wired hook rather than always warning.
   mkdir -p "$probe/.claude"
-  printf '{"hooks":{"PreToolUse":[{"hooks":[{"command":"x/emulock-guard.sh"}]}]}}\n' \
+  printf '{"hooks":{"PreToolUse":[{"hooks":[{"command":"x/emuriad-guard.sh"}]}]}}\n' \
     >"$probe/.claude/settings.json"
   out="$(cd "$probe" && HOME="$probe" EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
          "$LOCK" doctor 2>&1)"

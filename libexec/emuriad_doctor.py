@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""emulock doctor <serial>: check a claimed device before on-device work.
+"""emuriad doctor <serial>: check a claimed device before on-device work.
 
 Most lost on-device sessions are the device, not the code: the wrong APK
 installed (a shell whose cwd reset installed another checkout's build),
@@ -7,7 +7,7 @@ opportunistic Private DNS killing name resolution on the emulator's NAT, a
 locale that fails English assertions, a permission dialog or the keyboard
 swallowing taps a UI driver reports as successful, and a loaded host turning a
 43 ms call into ~4 s. Each is usually found only after the time is gone. This
-runs every check in one pass, right after `emulock claim`.
+runs every check in one pass, right after `emuriad claim`.
 
 Read-only by default. `--fix` applies only safe, reversible device settings
 (Private DNS off on emulators, grant POST_NOTIFICATIONS, approve App Link
@@ -17,18 +17,20 @@ The lock check runs first and stops everything if this session does not hold
 the serial: the guard hook only inspects top-level commands, so a tool that
 runs adb itself has to police itself.
 
-Project checks: if <repo>/.emulock/doctor.py exists (config: doctor.plugin), its
+Project checks: if <repo>/.emuriad/doctor.py exists (config: doctor.plugin), its
 `checks(device, ctx)` function runs after the built-in checks and returns more
-Check objects. Import them with `from emulock_doctor import Check, OK, WARN, ...`.
+Check objects. Import them with `from emuriad_doctor import Check, OK, WARN, ...`
+(`from emulock_doctor import ...`, the pre-rename name, still works). A project
+still on .emulock/ from before the rename is read from there.
 It is the repo's own code, so it runs only when you run the doctor there; pass
 --no-project to skip it.
 
-Config (<repo>/.emulock/config), all optional:
+Config (<repo>/.emuriad/config), all optional:
   package[.<variant>]         app id to check          (no package: app checks are skipped)
   apk.glob[.<variant>]        build outputs, relative  (default: */build/outputs/apk/*/*/*.apk)
   build.command[.<variant>]   shown as the fix         (default: ./gradlew assembleDebug)
-  doctor.ignore               paths whose edits never reach the APK (default: .claude/ .github/ docs/ .emulock/)
-  doctor.plugin               project checks           (default: .emulock/doctor.py)
+  doctor.ignore               paths whose edits never reach the APK (default: .claude/ .github/ docs/ .emuriad/)
+  doctor.plugin               project checks           (default: .emuriad/doctor.py)
   locale                      expected locale          (default: en-US; "any" skips it)
   pool.max_age_days           golden snapshot age that warns (default: 7)
 """
@@ -51,13 +53,14 @@ from types import SimpleNamespace
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import emulock_common as common  # noqa: E402
+import emuriad_common as common  # noqa: E402
 
 # A project plugin imports this module by name; make that the running copy, not a second one.
-sys.modules.setdefault("emulock_doctor", sys.modules[__name__])
+sys.modules.setdefault("emuriad_doctor", sys.modules[__name__])
+sys.modules.setdefault("emulock_doctor", sys.modules[__name__])  # pre-rename plugins
 
 DEFAULT_APK_GLOB = "*/build/outputs/apk/*/*/*.apk"
-DEFAULT_IGNORE = ".claude/ .github/ docs/ .emulock/"
+DEFAULT_IGNORE = ".claude/ .github/ docs/ .emuriad/ .emulock/"
 # App Link states that mean "the app, not the browser, opens this domain".
 APP_LINK_OK = {"verified", "approved", "system_configured", "migrated", "restored"}
 # Load per core above which on-device timings stop meaning anything: a 43 ms
@@ -125,7 +128,7 @@ def check_lock(device: Device) -> Check:
     if not device.is_emulator:
         return Check("lock", SKIP, "physical device — not in the emulator lock store")
     meta = common.read_meta(device.serial)
-    claim = "emulock claim --pool (or emulock claim)"
+    claim = "emuriad claim --pool (or emuriad claim)"
     if meta is None:
         raise Stop(Check("lock", FAIL, f"{device.serial} is not claimed by anyone", fix=claim))
     owner = meta.get("OWNER_ID", "")
@@ -145,7 +148,7 @@ def check_boot(device: Device) -> tuple[Check, dict[str, str]]:
     state = device.adb("get-state")
     if state != "device" and not device.dry_run:
         raise Stop(Check("boot", FAIL, f"adb reports '{state or 'nothing'}' for {device.serial}",
-                         fix="emulock reclaim, then run the boot command it prints"))
+                         fix="emuriad reclaim, then run the boot command it prints"))
     booted = device.shell("getprop sys.boot_completed")
     identity["api"] = device.shell("getprop ro.build.version.sdk")
     if device.is_emulator:
@@ -159,7 +162,7 @@ def check_boot(device: Device) -> tuple[Check, dict[str, str]]:
     if avd and locked_avd and locked_avd not in ("unknown", avd):
         return Check("boot", WARN,
                      f"{device.serial} now serves AVD {avd}, but the lock is for {locked_avd} — the serial is not the identity",
-                     fix="emulock reclaim"), identity
+                     fix="emuriad reclaim"), identity
     return Check("boot", OK, detail + (f", AVD {avd}" if avd else "")), identity
 
 
@@ -184,14 +187,14 @@ def check_golden(device: Device, max_age_days: int) -> Check | None:
         baked = snapshot.stat().st_mtime
     else:
         return Check("golden", WARN, f"no '{name}' snapshot found for this pool instance",
-                     fix="emulock pool bake" + (" --window" if name == "golden-window" else ""))
+                     fix="emuriad pool bake" + (" --window" if name == "golden-window" else ""))
     age = int((time.time() - baked) // 86400)
     source = f" from {commit}" if commit and commit != "unknown" else ""
     if age > max_age_days:
         return Check("golden", WARN,
                      f"'{name}' is {age} days old{source} — installs over it get slower and its app data "
                      "drifts from what the code expects",
-                     fix="emulock pool rebake when the pool is idle")
+                     fix="emuriad pool rebake when the pool is idle")
     return Check("golden", OK, f"'{name}' baked {age} day(s) ago{source}")
 
 
@@ -385,8 +388,13 @@ def check_host_load(load: tuple[float, float, float] | None = None, cores: int |
 # --- project checks ------------------------------------------------------------------
 
 
+def default_plugin(root: Path) -> str:
+    """doctor.py in the project's config directory (.emuriad/, or the pre-rename .emulock/)."""
+    return str(common.config_dir(root).relative_to(root) / "doctor.py")
+
+
 def load_plugin(path: Path):
-    spec = importlib.util.spec_from_file_location("emulock_project_doctor", path)
+    spec = importlib.util.spec_from_file_location("emuriad_project_doctor", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
@@ -457,7 +465,7 @@ def apply_fixes(device: Device, checks: list[Check]) -> list[str]:
 
 def render(serial: str, variant: str, identity: dict[str, str], checks: list[Check], applied: list[str]) -> str:
     header = " · ".join(filter(None, [
-        f"emulock doctor {serial}",
+        f"emuriad doctor {serial}",
         f"AVD {identity['avd']}" if identity.get("avd") else None,
         f"API {identity['api']}" if identity.get("api") else None,
         variant or None,
@@ -494,11 +502,11 @@ def build_context(serial: str, variant: str | None, package: str | None, worktre
 
 def report(serial: str, variant: str | None = None, package: str | None = None, worktree: Path | None = None,
            use_project: bool = True) -> dict:
-    """The --json report, for tools that want it in-process (emulock evidence)."""
+    """The --json report, for tools that want it in-process (emuriad evidence)."""
     root = worktree or common.project_root()
     config = common.Config(root)
     ctx = build_context(serial, variant, package, root, config)
-    plugin = (root / config.get("doctor.plugin", ".emulock/doctor.py")) if use_project else None
+    plugin = (root / config.get("doctor.plugin", default_plugin(root))) if use_project else None
     checks, identity = run_checks(Device(serial), ctx, plugin)
     return {"serial": serial, "variant": ctx.variant, "package": ctx.package, "worktree": str(root), **identity,
             "checks": [asdict(c) for c in checks]}
@@ -506,38 +514,38 @@ def report(serial: str, variant: str | None = None, package: str | None = None, 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="emulock doctor",
+        prog="emuriad doctor",
         description="Check a claimed device before on-device work: lock, boot, golden age, installed build, "
                     "DNS, locale, permissions, app links, what is on top, project checks, host load.",
         epilog="Config (" + __doc__.split("Config (", 1)[1],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("serial", help="the serial you claimed (emulock status)")
+    parser.add_argument("serial", help="the serial you claimed (emuriad status)")
     parser.add_argument("variant", nargs="?", default=None,
-                        help="a variant from .emulock/config (package.<variant>), e.g. staging")
+                        help="a variant from .emuriad/config (package.<variant>), e.g. staging")
     parser.add_argument("--package", help="app id to check, instead of the configured one")
     parser.add_argument("--fix", action="store_true", help="apply the safe, reversible fixes the checks suggest")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--dry-run", action="store_true", help="print the device commands instead of running them")
     parser.add_argument("--worktree", type=Path, default=None,
                         help="checkout whose build output the installed APK should match (default: the current one)")
-    parser.add_argument("--no-project", action="store_true", help="skip the project's .emulock/doctor.py")
+    parser.add_argument("--no-project", action="store_true", help="skip the project's .emuriad/doctor.py")
     args = parser.parse_args(argv)
 
     worktree = (args.worktree or common.project_root()).resolve()
     config = common.Config(worktree)
     variants = config.variants()
     if args.variant and variants and args.variant not in variants:
-        parser.error(f"unknown variant '{args.variant}' — .emulock/config declares: {', '.join(variants)}")
+        parser.error(f"unknown variant '{args.variant}' — .emuriad/config declares: {', '.join(variants)}")
     ctx = build_context(args.serial, args.variant, args.package, worktree, config)
-    plugin = None if args.no_project else worktree / config.get("doctor.plugin", ".emulock/doctor.py")
+    plugin = None if args.no_project else worktree / config.get("doctor.plugin", default_plugin(worktree))
 
     device = Device(args.serial, dry_run=args.dry_run)
     checks, identity = run_checks(device, ctx, plugin)
     applied = apply_fixes(device, checks) if args.fix else []
 
     if args.dry_run:
-        print(f"emulock doctor {args.serial} (dry run) — lock: {checks[0].status}, {checks[0].detail}")
+        print(f"emuriad doctor {args.serial} (dry run) — lock: {checks[0].status}, {checks[0].detail}")
         print("device commands it would run (later ones depend on earlier output):")
         print("\n".join(f"  {cmd}" for cmd in device.planned) or "  none — stopped at the lock check")
         return 0

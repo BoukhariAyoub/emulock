@@ -19,9 +19,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EMULOCK = ROOT / "bin" / "emulock"
+EMURIAD = ROOT / "bin" / "emuriad"
 sys.path.insert(0, str(ROOT / "libexec"))
-import emulock_common as common  # noqa: E402
+import emuriad_common as common  # noqa: E402
 
 FAKE_ADB = "#!/bin/sh\n[ \"$1\" = devices ] && echo 'List of devices attached'\nexit 0\n"
 
@@ -54,17 +54,17 @@ class CliTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_cli(self, *args: str, stdin: str = "", **env: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["/bin/bash", str(EMULOCK), *args], cwd=self.repo, input=stdin,
+        return subprocess.run(["/bin/bash", str(EMURIAD), *args], cwd=self.repo, input=stdin,
                               capture_output=True, text=True, env={**self.env, **env})
 
     def config(self, text: str):
-        (self.repo / ".emulock").mkdir(exist_ok=True)
-        (self.repo / ".emulock" / "config").write_text(textwrap.dedent(text))
+        (self.repo / ".emuriad").mkdir(exist_ok=True)
+        (self.repo / ".emuriad" / "config").write_text(textwrap.dedent(text))
 
     # --- version + config -------------------------------------------------------------
 
     def test_version(self):
-        self.assertRegex(self.run_cli("version").stdout, r"^emulock \d+\.\d+\.\d+")
+        self.assertRegex(self.run_cli("version").stdout, r"^emuriad \d+\.\d+\.\d+")
         self.assertEqual(self.run_cli("version").stdout, self.run_cli("--version").stdout)
 
     def test_bash_and_python_read_the_config_the_same_way(self):
@@ -86,12 +86,12 @@ class CliTest(unittest.TestCase):
         self.assertIn("run: ./gradlew :app:assembleDebug -Pa=b\n", out.stdout)
         self.assertIn("fetch origin/main#not-a-comment", out.stdout)
         # The environment beats the file, in both.
-        self.assertIn("no AVD env_pool yet", self.run_cli("pool", "status", EMULOCK_POOL_AVD="env_pool").stdout)
-        os.environ["EMULOCK_POOL_AVD"] = "env_pool"
+        self.assertIn("no AVD env_pool yet", self.run_cli("pool", "status", EMURIAD_POOL_AVD="env_pool").stdout)
+        os.environ["EMURIAD_POOL_AVD"] = "env_pool"
         try:
             self.assertEqual("env_pool", common.Config(self.repo).get("pool.avd"))
         finally:
-            del os.environ["EMULOCK_POOL_AVD"]
+            del os.environ["EMURIAD_POOL_AVD"]
 
     # --- guard -----------------------------------------------------------------------
 
@@ -113,11 +113,11 @@ class CliTest(unittest.TestCase):
     def test_doctor_sees_the_guard_wired_user_level_or_through_a_project_hook(self):
         self.assertIn("NOT wired", self.run_cli("doctor").stdout)
         (self.home / ".claude" / "settings.json").write_text(json.dumps(
-            {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "/opt/homebrew/bin/emulock guard"}]}]}}))
+            {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "/opt/homebrew/bin/emuriad guard"}]}]}}))
         self.assertIn("wired into", self.run_cli("doctor").stdout)
         (self.home / ".claude" / "settings.json").unlink()
         (self.repo / ".claude" / "hooks").mkdir(parents=True)
-        (self.repo / ".claude" / "hooks" / "device-guard.sh").write_text("#!/bin/bash\nemulock guard\n")
+        (self.repo / ".claude" / "hooks" / "device-guard.sh").write_text("#!/bin/bash\nemuriad guard\n")
         (self.repo / ".claude" / "settings.json").write_text(json.dumps(
             {"hooks": {"PreToolUse": [{"hooks": [{"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/device-guard.sh"}]}]}}))
         self.assertIn("through a hook", self.run_cli("doctor").stdout)
@@ -138,7 +138,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(0, out.returncode, out.stderr)
         self.assertIn('"command"', out.stdout)
         self.assertFalse((self.home / ".claude" / "settings.json").exists())
-        self.assertFalse((self.home / ".claude" / "skills" / "emulock").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "emuriad").exists())
 
     def test_init_yes_links_the_skill_and_keeps_existing_settings(self):
         (self.home / ".claude" / "settings.json").write_text(json.dumps(
@@ -149,8 +149,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual("x", settings["model"])
         commands = [h["command"] for e in settings["hooks"]["PreToolUse"] for h in e["hooks"]]
         self.assertEqual("other", commands[0])
-        self.assertTrue(commands[1].endswith("emulock guard"), commands)
-        skill = self.home / ".claude" / "skills" / "emulock"
+        self.assertTrue(commands[1].endswith("emuriad guard"), commands)
+        skill = self.home / ".claude" / "skills" / "emuriad"
         self.assertTrue(skill.is_symlink())
         self.assertTrue((skill / "SKILL.md").is_file())
         self.assertTrue((self.home / ".claude" / "settings.json.bak").exists())
@@ -160,45 +160,45 @@ class CliTest(unittest.TestCase):
         self.assertEqual(settings, self.settings())
 
     def homebrew_layout(self) -> Path:
-        """A Cellar keg plus the prefix symlinks Homebrew makes for it; returns prefix/bin/emulock."""
-        keg = self.tmp / "Cellar" / "emulock" / "9.9.9"
+        """A Cellar keg plus the prefix symlinks Homebrew makes for it; returns prefix/bin/emuriad."""
+        keg = self.tmp / "Cellar" / "emuriad" / "9.9.9"
         shutil.copytree(ROOT / "bin", keg / "bin")
         shutil.copytree(ROOT / "libexec", keg / "libexec", ignore=shutil.ignore_patterns("__pycache__"))
-        (keg / "share" / "emulock").mkdir(parents=True)
-        shutil.copytree(ROOT / "hooks", keg / "share" / "emulock" / "hooks")
-        shutil.copytree(ROOT / "skills", keg / "share" / "emulock" / "skills")
+        (keg / "share" / "emuriad").mkdir(parents=True)
+        shutil.copytree(ROOT / "hooks", keg / "share" / "emuriad" / "hooks")
+        shutil.copytree(ROOT / "skills", keg / "share" / "emuriad" / "skills")
         prefix = self.tmp / "prefix"
         (prefix / "bin").mkdir(parents=True)
         (prefix / "share").mkdir()
-        (prefix / "bin" / "emulock").symlink_to("../../Cellar/emulock/9.9.9/bin/emulock")
-        (prefix / "share" / "emulock").symlink_to("../../Cellar/emulock/9.9.9/share/emulock")
-        return prefix / "bin" / "emulock"
+        (prefix / "bin" / "emuriad").symlink_to("../../Cellar/emuriad/9.9.9/bin/emuriad")
+        (prefix / "share" / "emuriad").symlink_to("../../Cellar/emuriad/9.9.9/share/emuriad")
+        return prefix / "bin" / "emuriad"
 
     def test_init_links_the_skill_through_the_unversioned_prefix(self):
-        emulock = self.homebrew_layout()
-        out = subprocess.run(["/bin/bash", str(emulock), "init", "--yes", "--no-hook"], cwd=self.repo,
+        emuriad = self.homebrew_layout()
+        out = subprocess.run(["/bin/bash", str(emuriad), "init", "--yes", "--no-hook"], cwd=self.repo,
                              capture_output=True, text=True, env=self.env)
         self.assertEqual(0, out.returncode, out.stderr)
-        link = os.readlink(self.home / ".claude" / "skills" / "emulock")
-        self.assertIn("prefix/share/emulock/skills/emulock", link)
+        link = os.readlink(self.home / ".claude" / "skills" / "emuriad")
+        self.assertIn("prefix/share/emuriad/skills/emuriad", link)
         self.assertNotIn("9.9.9", link)  # an upgrade removes the versioned keg
 
     def test_init_relinks_a_skill_left_pointing_into_an_old_keg(self):
-        emulock = self.homebrew_layout()
+        emuriad = self.homebrew_layout()
         skills = self.home / ".claude" / "skills"
         skills.mkdir(parents=True)
-        (skills / "emulock").symlink_to(self.tmp / "Cellar" / "emulock" / "0.1.0" / "share" / "emulock" / "skills" / "emulock")
-        out = subprocess.run(["/bin/bash", str(emulock), "init", "--yes", "--no-hook"], cwd=self.repo,
+        (skills / "emuriad").symlink_to(self.tmp / "Cellar" / "emuriad" / "0.1.0" / "share" / "emuriad" / "skills" / "emuriad")
+        out = subprocess.run(["/bin/bash", str(emuriad), "init", "--yes", "--no-hook"], cwd=self.repo,
                              capture_output=True, text=True, env=self.env)
         self.assertIn("relinked", out.stdout)
-        self.assertTrue((skills / "emulock" / "SKILL.md").is_file())
+        self.assertTrue((skills / "emuriad" / "SKILL.md").is_file())
 
     def test_init_project_copies_the_skill_and_uses_the_path_command(self):
         out = self.run_cli("init", "--project", "--yes")
         self.assertEqual(0, out.returncode, out.stderr)
         settings = json.loads((self.repo / ".claude" / "settings.json").read_text())
-        self.assertEqual("emulock guard", settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
-        skill = self.repo / ".claude" / "skills" / "emulock"
+        self.assertEqual("emuriad guard", settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        skill = self.repo / ".claude" / "skills" / "emuriad"
         self.assertFalse(skill.is_symlink())
         self.assertTrue((skill / "SKILL.md").is_file())
 
@@ -214,12 +214,12 @@ class CliTest(unittest.TestCase):
     def test_pool_bake_dry_run_names_the_setup_hook_and_checks(self):
         self.config("pool.avd = test_pool\npool.verify = lock boot tutorial\n")
         (self.avd_home / "test_pool.avd").mkdir()
-        (self.repo / ".emulock" / "pool-setup.sh").write_text("#!/bin/bash\n")
+        (self.repo / ".emuriad" / "pool-setup.sh").write_text("#!/bin/bash\n")
         out = self.run_cli("pool", "bake", "--dry-run")
         self.assertEqual(0, out.returncode, out.stderr)
         self.assertIn("pool-setup.sh", out.stdout)
         self.assertIn("verify (lock boot tutorial)", out.stdout)
-        self.assertFalse((self.avd_home / "test_pool.avd" / "emulock-pool").exists())  # dry run: no marker
+        self.assertFalse((self.avd_home / "test_pool.avd" / "emuriad-pool").exists())  # dry run: no marker
 
     def test_pool_bake_window_dry_run_names_the_window_snapshot(self):
         self.config("pool.avd = test_pool\n")

@@ -1,4 +1,4 @@
-"""Tests for `emulock claim --pool`.
+"""Tests for `emuriad claim --pool`.
 
 Run: python3 tests/test_pool.py   (no pytest needed; tests/run.sh runs it too)
      python3 -m pytest tests -q            (if pytest is installed)
@@ -19,7 +19,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-LOCK_SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "emulock"
+LOCK_SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "emuriad"
 ME = "claude-code:test-session"
 POOL = "agent_pool"
 
@@ -71,9 +71,9 @@ class PoolTest(unittest.TestCase):
 
         self.locks = self.tmp / "locks"
         self.locks.mkdir()
-        # The project names its pool AVD in .emulock/config (the tests run from self.tmp).
-        (self.tmp / ".emulock").mkdir()
-        (self.tmp / ".emulock" / "config").write_text("# test project\npool.avd = agent_pool\n")
+        # The project names its pool AVD in .emuriad/config (the tests run from self.tmp).
+        (self.tmp / ".emuriad").mkdir()
+        (self.tmp / ".emuriad" / "config").write_text("# test project\npool.avd = agent_pool\n")
         self.env = {
             "PATH": f"{bin_dir}:/usr/bin:/bin",
             "HOME": str(self.tmp),
@@ -160,7 +160,7 @@ class PoolTest(unittest.TestCase):
         shutil.rmtree(self.snapshot)
         out = self.lock("claim", "--pool")
         self.assertNotEqual(0, out.returncode)
-        self.assertIn("emulock pool bake", out.stderr)
+        self.assertIn("emuriad pool bake", out.stderr)
         self.assertEqual([], list(self.locks.glob("emulator-*")))
 
     def test_a_held_booted_pool_instance_is_returned(self):
@@ -235,13 +235,13 @@ class PoolTest(unittest.TestCase):
         self.assertIn("snapshot 'golden' ready", out.stdout)
 
     def test_a_marked_pool_avd_is_skipped_even_without_config(self):
-        (self.tmp / ".emulock" / "config").unlink()
-        (self.avd_home / f"{POOL}.avd" / "emulock-pool").touch()
+        (self.tmp / ".emuriad" / "config").unlink()
+        (self.avd_home / f"{POOL}.avd" / "emuriad-pool").touch()
         out = self.lock("claim", devices=f"emulator-5560=device={POOL}")
         self.assertNotIn("emulator-5560", out.stdout)  # never handed out by a plain claim
 
     def test_the_pool_avd_comes_from_the_environment_too(self):
-        out = self.lock("--dry-run", "claim", "--pool", EMULOCK_POOL_AVD="other_pool")
+        out = self.lock("--dry-run", "claim", "--pool", EMURIAD_POOL_AVD="other_pool")
         self.assertIn("no 'golden' snapshot on AVD other_pool", out.stderr)
 
     # --- the windowed snapshot ------------------------------------------------------
@@ -249,7 +249,7 @@ class PoolTest(unittest.TestCase):
     def test_a_window_claim_needs_golden_window(self):
         out = self.lock("claim", "--pool", "--window")
         self.assertNotEqual(0, out.returncode)
-        self.assertIn("emulock pool bake --window", out.stderr)
+        self.assertIn("emuriad pool bake --window", out.stderr)
         self.assertFalse(any(self.locks.iterdir()))
 
     def test_a_window_claim_boots_golden_window_with_a_window(self):

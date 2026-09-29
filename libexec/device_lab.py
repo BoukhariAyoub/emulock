@@ -23,7 +23,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-# EMULATOR_LOCK_DIR is the documented name and what the emulock CLI reads;
+# EMULATOR_LOCK_DIR is the documented name and what the emuriad CLI reads;
 # EMULATOR_LOCK_ROOT is accepted because this file used to read only that, and
 # a dashboard silently watching a different store than the CLI writes to is the
 # most confusing failure this tool could have.
@@ -32,8 +32,8 @@ LOCK_ROOT = Path(
     or os.environ.get("EMULATOR_LOCK_ROOT")
     or Path.home() / ".emulator-locks"
 )
-IDLE_TTL = int(os.environ.get("EMULATOR_LOCK_IDLE_TTL", "14400"))  # 4h, matches emulock
-ABSENT_GRACE = 600  # 10 min boot grace, matches emulock
+IDLE_TTL = int(os.environ.get("EMULATOR_LOCK_IDLE_TTL", "14400"))  # 4h, matches emuriad
+ABSENT_GRACE = 600  # 10 min boot grace, matches emuriad
 POLL_CACHE_SECONDS = 1.5
 
 _cache: dict = {"at": 0.0, "data": None}
@@ -386,8 +386,8 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
 <section><h2>Reserved devices</h2><div id="devices"></div></section>
 <section><h2>Attached without a lock</h2><div id="unmanaged"></div></section>
 <section><h2>Installed AVDs</h2><div class="avds" id="avds"></div></section>
-<footer>Read-only view of <code>emulock</code> state. Claim with
-<code>emulock claim</code>, release with <code>emulock release &lt;serial&gt;</code>.
+<footer>Read-only view of <code>emuriad</code> state. Claim with
+<code>emuriad claim</code>, release with <code>emuriad release &lt;serial&gt;</code>.
 Never touch a serial you did not claim.</footer>
 <script>
 const dur = s => {

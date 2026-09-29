@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# emulock pool — build and inspect the agent emulator pool.
+# emuriad pool — build and inspect the agent emulator pool.
 #
-# Agents claim pool instances with `emulock claim --pool`: read-only copies of
+# Agents claim pool instances with `emuriad claim --pool`: read-only copies of
 # one AVD, each booted from its `golden` snapshot. This script makes that
 # snapshot. Everything an agent would otherwise fix by hand on a fresh device is
 # already done in it:
@@ -10,16 +10,16 @@
 #   device  locale checked, Private DNS off, animations off, screen always on,
 #           no lock screen, hardware keyboard (the IME never covers the screen)
 #   app     optional: pool.apk installed, then the project's own setup hook
-#           (.emulock/pool-setup.sh) — sign-out state, first-run flags, permissions
+#           (.emuriad/pool-setup.sh) — sign-out state, first-run flags, permissions
 #
 # Agents install their own build over it (`adb install -r` keeps that app
 # state). The snapshot's app build is only a starting state, so re-bake when
 # the setup above changes, or weekly with `rebake`.
 #
 # Usage:
-#   emulock pool status
-#   emulock pool bake [--window] [--apk PATH] [--dry-run]
-#   emulock pool rebake [--dry-run]     bake from a fresh build of pool.ref in a throwaway checkout
+#   emuriad pool status
+#   emuriad pool bake [--window] [--apk PATH] [--dry-run]
+#   emuriad pool rebake [--dry-run]     bake from a fresh build of pool.ref in a throwaway checkout
 #
 # --window bakes `golden-window` instead of `golden`: the same setup, saved from
 # a boot with a window, for `claim --pool --window` (a device someone can
@@ -27,7 +27,7 @@
 # golden-window too once it exists.
 #
 # bake creates the AVD if missing, claims it writable by name, cold-boots it
-# headless, applies the setup, checks the result with `emulock doctor` and only
+# headless, applies the setup, checks the result with `emuriad doctor` and only
 # then saves `golden`, shuts the emulator down and releases the lock. It refuses
 # while any pool instance is claimed or running. About 3-5 minutes.
 #
@@ -37,19 +37,21 @@
 # permission the delete fails and golden survives. bake lifts the protection only
 # for the save. To delete the AVD by hand: chmod -R u+w <avd>/snapshots/golden.
 #
-# Config (<repo>/.emulock/config, or EMULOCK_<KEY> in the environment):
+# Config (<repo>/.emuriad/config, or EMURIAD_<KEY> in the environment; the
+# pre-rename .emulock/config and EMULOCK_<KEY> still work):
 #   pool.avd        AVD name                        (default: emulock_pool)
 #   pool.max        pool instances at once          (default: 3, ~2 GB RAM each)
 #   pool.image      system image, API < 36          (default: android-34 google_apis, host arch)
 #   pool.device     avdmanager device profile       (default: medium_phone)
 #   pool.apk        APK installed before setup, relative to the repo (optional)
-#   pool.setup      setup hook, run as: bash <hook> <serial>   (default: .emulock/pool-setup.sh)
+#   pool.setup      setup hook, run as: bash <hook> <serial>   (default: .emuriad/pool-setup.sh)
 #   pool.verify     doctor checks that must be ok before saving (default: lock boot dns locale on-top)
 #   pool.build      rebake: the command that builds pool.apk    (required for rebake)
 #   pool.ref        rebake: what to build            (default: origin/main)
 #   locale          the locale the image must boot in (default: en-US; "any" skips it)
 #
-# The setup hook gets EMULOCK_SERIAL, EMULOCK_APK and ANDROID_SERIAL. It runs
+# The setup hook gets EMURIAD_SERIAL, EMURIAD_APK and ANDROID_SERIAL (and the
+# pre-rename EMULOCK_SERIAL, EMULOCK_APK). It runs
 # adb itself, which the guard cannot see, so it must only touch that serial.
 #
 set -euo pipefail
@@ -64,25 +66,29 @@ POOL_SNAPSHOT="golden"
 POOL_SNAPSHOT_WINDOW="golden-window"
 SNAP="$POOL_SNAPSHOT"   # the snapshot this bake writes
 WINDOW=0
-LOCK="${EMULOCK_BIN:-emulock}"
+LOCK="${EMURIAD_BIN:-emuriad}"
 
-DRY_RUN="${EMULOCK_DRY_RUN:-0}"
+DRY_RUN="${EMURIAD_DRY_RUN:-0}"
 SERIAL=""
 EMU_PID=""
 DONE=0
 REBAKE_DIR=""
 APK=""
 
-die() { echo "emulock pool: $*" >&2; exit 1; }
-say() { echo "emulock pool: $*"; }
+die() { echo "emuriad pool: $*" >&2; exit 1; }
+say() { echo "emuriad pool: $*"; }
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-conf_get() { # conf_get <key> [default] — same rules as bin/emulock
-  local key="$1" def="${2:-}" env_name val="" file="$PROJECT_ROOT/.emulock/config"
-  env_name="EMULOCK_$(printf '%s' "$key" | tr '[:lower:].-' '[:upper:]__')"
-  val="${!env_name:-}"
+# The project's config directory: .emuriad/, or .emulock/ from before the rename.
+CONF_DIR=.emuriad
+[[ ! -d "$PROJECT_ROOT/.emuriad" && -d "$PROJECT_ROOT/.emulock" ]] && CONF_DIR=.emulock
+
+conf_get() { # conf_get <key> [default] — same rules as bin/emuriad
+  local key="$1" def="${2:-}" env_name val="" file="$PROJECT_ROOT/$CONF_DIR/config"
+  env_name="$(printf '%s' "$key" | tr '[:lower:].-' '[:upper:]__')"
+  val="$(printenv "EMURIAD_$env_name" || printenv "EMULOCK_$env_name" || true)"
   if [[ -z "$val" && -f "$file" ]]; then
     val="$(awk -v k="$key" '
       { line = $0; sub(/^[ \t]+/, "", line) }
@@ -103,7 +109,7 @@ POOL_MAX="${EMULATOR_POOL_MAX:-$(conf_get pool.max 3)}"
 POOL_IMAGE="$(conf_get pool.image "system-images;android-34;google_apis;$(host_abi)")"
 DEVICE_PROFILE="$(conf_get pool.device medium_phone)"
 LOCALE="$(conf_get locale en-US)"
-SETUP="$(conf_get pool.setup .emulock/pool-setup.sh)"
+SETUP="$(conf_get pool.setup "$CONF_DIR/pool-setup.sh")"
 VERIFY="$(conf_get pool.verify "lock boot dns locale on-top")"
 BUILD="$(conf_get pool.build)"
 REF="$(conf_get pool.ref origin/main)"
@@ -154,10 +160,10 @@ create_avd() {
   set_config showDeviceFrame no
 }
 
-# The marker that makes every emulock component treat this AVD as a pool AVD:
+# The marker that makes every emuriad component treat this AVD as a pool AVD:
 # plain claims skip it, reap shuts down unowned instances, the guard holds its
 # snapshot boots to -no-window.
-mark_pool_avd() { [[ "$DRY_RUN" == 1 ]] || : > "$(avd_dir)/emulock-pool"; }
+mark_pool_avd() { [[ "$DRY_RUN" == 1 ]] || : > "$(avd_dir)/emuriad-pool"; }
 
 pool_in_use() { # 0 = some instance of the pool AVD is claimed or running
   local d serial
@@ -193,14 +199,14 @@ write_golden_record() { # what was baked, from where — doctor reads it to warn
 remove_rebake_checkout() {
   [[ -n "$REBAKE_DIR" && -d "$REBAKE_DIR" ]] || return 0
   git -C "$PROJECT_ROOT" worktree remove "$REBAKE_DIR" >/dev/null 2>&1 \
-    || echo "emulock pool: could not remove the rebake checkout $REBAKE_DIR — remove it by hand" >&2
+    || echo "emuriad pool: could not remove the rebake checkout $REBAKE_DIR — remove it by hand" >&2
 }
 
 on_exit() { cleanup; remove_rebake_checkout; }
 
 cleanup() { # on any exit before the bake finished: never leave a writable pool AVD running
   [[ "$DONE" == 1 || -z "$SERIAL" ]] && return 0
-  echo "emulock pool: bake did not finish — shutting $SERIAL down and releasing it; '$SNAP' was not changed" >&2
+  echo "emuriad pool: bake did not finish — shutting $SERIAL down and releasing it; '$SNAP' was not changed" >&2
   adb -s "$SERIAL" emu kill >/dev/null 2>&1 || true
   [[ -n "$EMU_PID" ]] && wait "$EMU_PID" 2>/dev/null || true
   protect_snapshot || true
@@ -212,7 +218,7 @@ setup_device() {
   locale="$(dev_sh getprop persist.sys.locale)"
   [[ -n "$locale" ]] || locale="$(dev_sh getprop ro.product.locale)"
   if [[ "$LOCALE" != any && "$locale" != "$LOCALE" ]]; then
-    die "the image boots in '$locale', not $LOCALE (set locale = any in .emulock/config to accept it)"
+    die "the image boots in '$locale', not $LOCALE (set locale = any in $CONF_DIR/config to accept it)"
   fi
   dev_sh settings put global private_dns_mode off
   dev_sh settings put global window_animation_scale 0
@@ -235,7 +241,8 @@ setup_app() {
   hook="$(abs_in "$PROJECT_ROOT" "$SETUP")"
   if [[ -f "$hook" ]]; then
     say "running the project's setup hook: $hook"
-    EMULOCK_SERIAL="$SERIAL" EMULOCK_APK="$APK" ANDROID_SERIAL="$SERIAL" /bin/bash "$hook" "$SERIAL" \
+    EMURIAD_SERIAL="$SERIAL" EMURIAD_APK="$APK" EMULOCK_SERIAL="$SERIAL" EMULOCK_APK="$APK" \
+      ANDROID_SERIAL="$SERIAL" /bin/bash "$hook" "$SERIAL" \
       || die "the setup hook failed: $hook"
   fi
   dev_sh input keyevent 3
@@ -254,13 +261,13 @@ required = set(sys.argv[2].split())
 try:
     checks = json.loads(sys.argv[1])["checks"]
 except (ValueError, KeyError):
-    sys.exit("emulock pool: not saving the snapshot — the doctor produced no report")
+    sys.exit("emuriad pool: not saving the snapshot — the doctor produced no report")
 bad = [f"{c['name']}: {c['detail']}" for c in checks if c["name"] in required and c["status"] != "ok"]
 missing = required - {c["name"] for c in checks}
 if missing:
     bad.append("checks that did not run: " + ", ".join(sorted(missing)))
 if bad:
-    sys.exit("emulock pool: not saving the snapshot — " + "; ".join(bad))
+    sys.exit("emuriad pool: not saving the snapshot — " + "; ".join(bad))
 PY
 }
 
@@ -279,7 +286,7 @@ cmd_bake() {
     APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
   fi
   create_avd
-  pool_in_use && die "pool instances are claimed or running — release them first (emulock status); a writable boot would fight them"
+  pool_in_use && die "pool instances are claimed or running — release them first (emuriad status); a writable boot would fight them"
   mark_pool_avd
 
   # --additional: `claim --avd` alone hands back a lock this session already holds.
@@ -287,7 +294,7 @@ cmd_bake() {
   if [[ "$DRY_RUN" == 1 ]]; then
     "$LOCK" --dry-run claim --additional --avd "$POOL_AVD" --note "pool bake"
     say "[dry-run] would cold-boot $( ((WINDOW)) && echo 'with a window' || echo headless), set up the device${APK:+, install $(basename "$APK")}, run $(abs_in "$PROJECT_ROOT" "$SETUP") if present,"
-    say "[dry-run] verify ($VERIFY) with emulock doctor, save '$SNAP', shut down, release"
+    say "[dry-run] verify ($VERIFY) with emuriad doctor, save '$SNAP', shut down, release"
     return 0
   fi
   claim_out="$("$LOCK" claim --additional --avd "$POOL_AVD" --note "pool bake")"
@@ -327,18 +334,18 @@ cmd_bake() {
   "$LOCK" release "$SERIAL" >/dev/null
   DONE=1
   if (( WINDOW )); then
-    say "done — a watchable device is now: emulock claim --pool --window"
+    say "done — a watchable device is now: emuriad claim --pool --window"
   else
-    say "done — agents can now: emulock claim --pool"
+    say "done — agents can now: emuriad claim --pool"
   fi
 }
 
 cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
-  [[ -n "$BUILD" ]] || die "rebake: set pool.build in .emulock/config (the command that builds the pool APK)"
-  [[ -n "$CONF_APK" ]] || die "rebake: set pool.apk in .emulock/config (where that build puts the APK)"
-  pool_in_use && die "pool instances are claimed or running — rebake when the pool is idle (emulock status)"
+  [[ -n "$BUILD" ]] || die "rebake: set pool.build in $CONF_DIR/config (the command that builds the pool APK)"
+  [[ -n "$CONF_APK" ]] || die "rebake: set pool.apk in $CONF_DIR/config (where that build puts the APK)"
+  pool_in_use && die "pool instances are claimed or running — rebake when the pool is idle (emuriad status)"
   local dir log remote="${REF%%/*}" branch="${REF#*/}"
-  dir="$(mktemp -d -t emulock-rebake)"
+  dir="$(mktemp -d -t emuriad-rebake)"
   if [[ "$DRY_RUN" == 1 ]]; then
     rmdir "$dir"
     say "[dry-run] would fetch $REF, check it out detached in a temporary directory, run: $BUILD"
@@ -352,7 +359,7 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
   trap on_exit EXIT
   # Android builds need the SDK path, which lives in an untracked file.
   [[ -f "$PROJECT_ROOT/local.properties" ]] && cp "$PROJECT_ROOT/local.properties" "$dir/"
-  log="$(mktemp -t emulock-rebake-log)"
+  log="$(mktemp -t emuriad-rebake-log)"
   say "building $REF ($(git -C "$dir" rev-parse --short HEAD)) — a cold build takes a few minutes; log: $log"
   (cd "$dir" && /bin/bash -c "$BUILD") >"$log" 2>&1 \
     || { tail -n 20 "$log" >&2; die "the build failed — full log: $log"; }
@@ -367,7 +374,7 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
 
 cmd_status() {
   if [[ ! -d "$(avd_dir)" ]]; then
-    echo "agent pool: no AVD $POOL_AVD yet — emulock pool bake"
+    echo "agent pool: no AVD $POOL_AVD yet — emuriad pool bake"
     return 0
   fi
   local snap claimed=0 d name how
@@ -377,8 +384,8 @@ cmd_status() {
   echo "agent pool: AVD $POOL_AVD ($(sed -n 's|^image\.sysdir\.1 *= *system-images/\([^/]*\)/\([^/]*\)/.*|\1 \2|p' "$(avd_dir)/config.ini"))"
   for name in "$POOL_SNAPSHOT" "$POOL_SNAPSHOT_WINDOW"; do
     snap="$(snapshot_dir "$name")"
-    how="headless: emulock claim --pool"
-    [[ "$name" == "$POOL_SNAPSHOT_WINDOW" ]] && how="with a window: emulock claim --pool --window"
+    how="headless: emuriad claim --pool"
+    [[ "$name" == "$POOL_SNAPSHOT_WINDOW" ]] && how="with a window: emuriad claim --pool --window"
     if [[ -d "$snap" ]]; then
       echo "  snapshot '$name' ($how): $(du -sh "$snap" | cut -f1)"
       [[ -w "$snap" ]] && echo "    writable: a boot that cannot load it deletes it (the next bake makes it read-only)"
@@ -387,15 +394,15 @@ cmd_status() {
         baked="$(sed -n 's/.*"baked_at": "\([^"]*\)".*/\1/p' "$(golden_record "$name")")"
         commit="$(sed -n 's/.*"commit": "\([^"]*\)".*/\1/p' "$(golden_record "$name")")"
         age="$(python3 -c 'import sys, datetime as d; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print((d.datetime.now(d.timezone.utc) - t).days)' "$baked" 2>/dev/null || echo "?")"
-        echo "    baked from $commit, $age day(s) old (refresh: emulock pool rebake)"
+        echo "    baked from $commit, $age day(s) old (refresh: emuriad pool rebake)"
       fi
     elif [[ "$name" == "$POOL_SNAPSHOT" ]]; then
-      echo "  snapshot '$name': missing — emulock pool bake"
+      echo "  snapshot '$name': missing — emuriad pool bake"
     else
-      echo "  snapshot '$name': not baked (for a watchable device: emulock pool bake --window)"
+      echo "  snapshot '$name': not baked (for a watchable device: emuriad pool bake --window)"
     fi
   done
-  echo "  claimed: $claimed/$POOL_MAX   (emulock status for owners)"
+  echo "  claimed: $claimed/$POOL_MAX   (emuriad status for owners)"
 }
 
 main() {
