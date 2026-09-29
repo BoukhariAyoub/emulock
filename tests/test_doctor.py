@@ -160,7 +160,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual("fail", by_name["boot"].status)
         self.assertEqual(["lock", "boot"], [c.name for c in checks])
 
-    # --- the golden phone behind a pool instance (ALL-3566) -----------------------------
+    # --- the golden phone behind a pool instance --------------------------------------
 
     def pool_instance(self, baked_days_ago: float | None, commit: str = "427b4ed", record: bool = True):
         (self.locks / SERIAL / "meta").write_text(

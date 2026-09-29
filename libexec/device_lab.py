@@ -386,8 +386,8 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
 <section><h2>Reserved devices</h2><div id="devices"></div></section>
 <section><h2>Attached without a lock</h2><div id="unmanaged"></div></section>
 <section><h2>Installed AVDs</h2><div class="avds" id="avds"></div></section>
-<footer>Read-only view of <code>emuriad</code> state. Claim with
-<code>emuriad check-in</code>, release with <code>emuriad check-out &lt;serial&gt;</code>.
+<footer>Read-only view of <code>emuriad</code> state. Check in with
+<code>emuriad check-in</code>, check out with <code>emuriad check-out &lt;serial&gt;</code>.
 Never touch a serial you did not check in to.</footer>
 <script>
 const dur = s => {
@@ -448,8 +448,8 @@ async function tick() {
         ? s.unmanaged.map(u => `<div class="card"><div class="row1">
             <span class="serial">${esc(u.serial)}</span>
             <span class="avd">${esc(u.model)}</span>
-            <span class="tag t-warn">unclaimed</span></div>
-            <div class="warn">Attached but held by no lock — claim it before use.</div>
+            <span class="tag t-warn">no lock</span></div>
+            <div class="warn">Attached but held by no lock — check in before use.</div>
           </div>`).join('')
         : '<div class="empty">Every attached device is accounted for.</div>';
     document.getElementById('avds').innerHTML =

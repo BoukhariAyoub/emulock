@@ -228,7 +228,7 @@ meta_get() { # meta_get <lockname> <KEY>   (lockname: emulator-5554 or avd-Name)
 
 # BSD stat (macOS) and GNU stat (Linux) spell this differently and neither
 # accepts the other's flag, so try both rather than branching on uname.
-file_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""; }
+file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo ""; }  # GNU first: on Linux, stat -f is filesystem mode
 
 # Seconds since last activity (last_used mtime, else CREATED_AT), or empty.
 lease_age() { # lease_age <serial>

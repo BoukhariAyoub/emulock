@@ -227,7 +227,7 @@ touch_lease() {
 
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 
-mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }  # GNU first: on Linux, stat -f is filesystem mode
 
 human_secs() { # 9240 -> "2h 34m"
   local s="$1" h m

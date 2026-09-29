@@ -345,7 +345,7 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
   [[ -n "$CONF_APK" ]] || die "rebake: set pool.apk in $CONF_DIR/config (where that build puts the APK)"
   pool_in_use && die "pool instances are claimed or running — rebake when the pool is idle (emuriad status)"
   local dir log remote="${REF%%/*}" branch="${REF#*/}"
-  dir="$(mktemp -d -t emuriad-rebake)"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/emuriad-rebake.XXXXXX")"
   if [[ "$DRY_RUN" == 1 ]]; then
     rmdir "$dir"
     say "[dry-run] would fetch $REF, check it out detached in a temporary directory, run: $BUILD"
@@ -359,7 +359,7 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
   trap on_exit EXIT
   # Android builds need the SDK path, which lives in an untracked file.
   [[ -f "$PROJECT_ROOT/local.properties" ]] && cp "$PROJECT_ROOT/local.properties" "$dir/"
-  log="$(mktemp -t emuriad-rebake-log)"
+  log="$(mktemp "${TMPDIR:-/tmp}/emuriad-rebake-log.XXXXXX")"
   say "building $REF ($(git -C "$dir" rev-parse --short HEAD)) — a cold build takes a few minutes; log: $log"
   (cd "$dir" && /bin/bash -c "$BUILD") >"$log" 2>&1 \
     || { tail -n 20 "$log" >&2; die "the build failed — full log: $log"; }

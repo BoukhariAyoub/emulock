@@ -183,7 +183,7 @@ test_guard() {
     mkdir -p "$hint_probe/$1"
     printf 'SERIAL=%s\nOWNER_ID=claude-code:someone\nOWNER_BRANCH=feat/x\n' "$1" >"$hint_probe/$1/meta"
     : >"$hint_probe/$1/last_used"
-    touch -t "$(date -r $((now - $2)) +%Y%m%d%H%M.%S)" "$hint_probe/$1/last_used"
+    python3 -c "import os, sys; t = int(sys.argv[2]); os.utime(sys.argv[1], (t, t))" "$hint_probe/$1/last_used" $((now - $2))
   }
   ask_hint() {
     printf '%s' "adb -s emulator-5599 shell ls" \

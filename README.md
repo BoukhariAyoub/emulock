@@ -1,5 +1,7 @@
 # emuriad
 
+[![tests](https://github.com/BoukhariAyoub/emuriad/actions/workflows/test.yml/badge.svg)](https://github.com/BoukhariAyoub/emuriad/actions/workflows/test.yml)
+
 **Stop parallel coding agents from fighting over the same Android emulator.**
 
 ![emuriad-lab — the read-only dashboard](docs/device-lab.png)
@@ -322,7 +324,7 @@ Each device resolves to one state, and **live observation always beats stored me
 
 | State | Meaning |
 |---|---|
-| `unclaimed` | running, owned by nobody — anyone's next command can take it |
+| `no lock` | running, owned by nobody — anyone's next command can take it |
 | `ghost` | the device died but the lock outlived it |
 | `expired` | lease ran out; reclaimable right now |
 | `yours` | this session owns it |
