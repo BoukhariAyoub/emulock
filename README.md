@@ -1,7 +1,5 @@
 # emuriad
 
-[![tests](https://github.com/BoukhariAyoub/emuriad/actions/workflows/test.yml/badge.svg)](https://github.com/BoukhariAyoub/emuriad/actions/workflows/test.yml)
-
 **Stop parallel coding agents from fighting over the same Android emulator.**
 
 ![emuriad-lab — the read-only dashboard](docs/device-lab.png)
