@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
-# install.sh — symlink emulock onto your PATH and print the hook wiring.
+# install.sh — symlink emulock onto your PATH (the no-Homebrew install).
 #
 # Deliberately boring: it creates two symlinks and one directory, prints every
-# action before taking it, and never edits a settings file for you. Wiring a
-# PreToolUse hook changes what commands your agent may run, so that edit stays
-# yours to make and to read.
+# action before taking it, and never edits a settings file. Wiring the
+# PreToolUse hook is `emulock init`, which shows the change and asks first.
 #
 #   ./install.sh                 install to ~/.local/bin
 #   ./install.sh --prefix ~/bin  install elsewhere
@@ -25,7 +24,7 @@ while [[ $# -gt 0 ]]; do
     --prefix) PREFIX="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --uninstall) MODE=uninstall; shift ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -51,6 +50,7 @@ run mkdir -p "$PREFIX" "$SHARE"
 run ln -sf "$HERE/bin/emulock" "$PREFIX/emulock"
 run ln -sf "$HERE/bin/emulock-lab" "$PREFIX/emulock-lab"
 run ln -sfn "$HERE/hooks" "$SHARE/hooks"
+run ln -sfn "$HERE/skills" "$SHARE/skills"
 
 echo
 case ":$PATH:" in
@@ -59,22 +59,12 @@ case ":$PATH:" in
      echo "      export PATH=\"$PREFIX:\$PATH\""; echo ;;
 esac
 
-cat <<JSON
-Now wire the guard into Claude Code. Add this to .claude/settings.json in each
-repo where you want unclaimed devices refused — commit it, and every contributor
-gets enforcement with no install step of their own:
+cat <<EOF
+Now wire the guard and install the agent skill — it shows each change and asks:
 
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "$SHARE/hooks/claude-code/emulock-guard.sh" }]
-      }
-    ]
-  }
-}
+    emulock init              # ~/.claude: every project on this machine
+    emulock init --project    # or this repo's .claude/ (commit it for your team)
 
-Then check it:  emulock status
+Then check it:  emulock doctor
 Run the tests:  $HERE/tests/run.sh
-JSON
+EOF

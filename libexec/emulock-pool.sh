@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+#
+# emulock pool — build and inspect the agent emulator pool.
+#
+# Agents claim pool instances with `emulock claim --pool`: read-only copies of
+# one AVD, each booted from its `golden` snapshot. This script makes that
+# snapshot. Everything an agent would otherwise fix by hand on a fresh device is
+# already done in it:
+#
+#   device  locale checked, Private DNS off, animations off, screen always on,
+#           no lock screen, hardware keyboard (the IME never covers the screen)
+#   app     optional: pool.apk installed, then the project's own setup hook
+#           (.emulock/pool-setup.sh) — sign-out state, first-run flags, permissions
+#
+# Agents install their own build over it (`adb install -r` keeps that app
+# state). The snapshot's app build is only a starting state, so re-bake when
+# the setup above changes, or weekly with `rebake`.
+#
+# Usage:
+#   emulock pool status
+#   emulock pool bake [--apk PATH] [--dry-run]
+#   emulock pool rebake [--dry-run]     bake from a fresh build of pool.ref in a throwaway checkout
+#
+# bake creates the AVD if missing, claims it writable by name, cold-boots it
+# headless, applies the setup, checks the result with `emulock doctor` and only
+# then saves `golden`, shuts the emulator down and releases the lock. It refuses
+# while any pool instance is claimed or running. About 3-5 minutes.
+#
+# golden is read-only on disk between bakes. A boot that cannot load it, because
+# a window or a -gpu flag picked another renderer, makes the emulator delete the
+# snapshot and exit, and -force-snapshot-load does not stop that. Without write
+# permission the delete fails and golden survives. bake lifts the protection only
+# for the save. To delete the AVD by hand: chmod -R u+w <avd>/snapshots/golden.
+#
+# Config (<repo>/.emulock/config, or EMULOCK_<KEY> in the environment):
+#   pool.avd        AVD name                        (default: emulock_pool)
+#   pool.max        pool instances at once          (default: 3, ~2 GB RAM each)
+#   pool.image      system image, API < 36          (default: android-34 google_apis, host arch)
+#   pool.device     avdmanager device profile       (default: medium_phone)
+#   pool.apk        APK installed before setup, relative to the repo (optional)
+#   pool.setup      setup hook, run as: bash <hook> <serial>   (default: .emulock/pool-setup.sh)
+#   pool.verify     doctor checks that must be ok before saving (default: lock boot dns locale on-top)
+#   pool.build      rebake: the command that builds pool.apk    (required for rebake)
+#   pool.ref        rebake: what to build            (default: origin/main)
+#   locale          the locale the image must boot in (default: en-US; "any" skips it)
+#
+# The setup hook gets EMULOCK_SERIAL, EMULOCK_APK and ANDROID_SERIAL. It runs
+# adb itself, which the guard cannot see, so it must only touch that serial.
+#
+set -euo pipefail
+
+SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+[[ -d "$SDK" ]] || SDK="$HOME/Android/Sdk"
+EMU_BIN="$SDK/emulator/emulator"
+AVDMANAGER="$SDK/cmdline-tools/latest/bin/avdmanager"
+AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
+POOL_SNAPSHOT="golden"
+LOCK="${EMULOCK_BIN:-emulock}"
+
+DRY_RUN="${EMULOCK_DRY_RUN:-0}"
+SERIAL=""
+EMU_PID=""
+DONE=0
+REBAKE_DIR=""
+APK=""
+
+die() { echo "emulock pool: $*" >&2; exit 1; }
+say() { echo "emulock pool: $*"; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+conf_get() { # conf_get <key> [default] — same rules as bin/emulock
+  local key="$1" def="${2:-}" env_name val="" file="$PROJECT_ROOT/.emulock/config"
+  env_name="EMULOCK_$(printf '%s' "$key" | tr '[:lower:].-' '[:upper:]__')"
+  val="${!env_name:-}"
+  if [[ -z "$val" && -f "$file" ]]; then
+    val="$(awk -v k="$key" '
+      { line = $0; sub(/^[ \t]+/, "", line) }
+      line == "" || line ~ /^#/ { next }
+      { i = index(line, "="); if (!i) next
+        name = substr(line, 1, i - 1); v = substr(line, i + 1)
+        gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", v)
+        if (name == k) { print v; exit } }' "$file")"
+  fi
+  printf '%s' "${val:-$def}"
+}
+
+host_abi() { case "$(uname -m)" in arm64|aarch64) echo arm64-v8a ;; *) echo x86_64 ;; esac; }
+
+POOL_AVD="${EMULATOR_POOL_AVD:-$(conf_get pool.avd emulock_pool)}"
+POOL_MAX="${EMULATOR_POOL_MAX:-$(conf_get pool.max 3)}"
+POOL_IMAGE="$(conf_get pool.image "system-images;android-34;google_apis;$(host_abi)")"
+DEVICE_PROFILE="$(conf_get pool.device medium_phone)"
+LOCALE="$(conf_get locale en-US)"
+SETUP="$(conf_get pool.setup .emulock/pool-setup.sh)"
+VERIFY="$(conf_get pool.verify "lock boot dns locale on-top")"
+BUILD="$(conf_get pool.build)"
+REF="$(conf_get pool.ref origin/main)"
+CONF_APK="$(conf_get pool.apk)"
+
+abs_in() { # abs_in <root> <path>: <path> as given if absolute, else under <root>
+  case "$2" in /*) printf '%s' "$2" ;; *) printf '%s/%s' "$1" "$2" ;; esac
+}
+
+avd_dir() { echo "$AVD_HOME/$POOL_AVD.avd"; }
+snapshot_dir() { echo "$(avd_dir)/snapshots/$POOL_SNAPSHOT"; }
+golden_record() { echo "$(avd_dir)/golden.json"; }
+dev() { adb -s "$SERIAL" "$@"; }
+dev_sh() { adb -s "$SERIAL" shell "$@" | tr -d '\r'; }
+
+# Read-only between bakes so a boot that cannot load it cannot delete it (header).
+protect_snapshot() { [[ ! -d "$(snapshot_dir)" ]] || chmod -R a-w "$(snapshot_dir)"; }
+unprotect_snapshot() { [[ ! -d "$(snapshot_dir)" ]] || chmod -R u+w "$(snapshot_dir)"; }
+
+set_config() { # set_config <key> <value> in the AVD's config.ini (portable: no sed -i)
+  local ini tmp
+  ini="$(avd_dir)/config.ini"
+  tmp="$(mktemp)"
+  grep -v "^$1 *=" "$ini" > "$tmp" || true
+  echo "$1=$2" >> "$tmp"
+  cat "$tmp" > "$ini"
+  rm -f "$tmp"
+}
+
+image_dir() { # system-images;android-34;google_apis;arm64-v8a -> $SDK/system-images/android-34/google_apis/arm64-v8a
+  printf '%s/%s' "$SDK" "$(printf '%s' "$POOL_IMAGE" | tr ';' '/')"
+}
+
+create_avd() {
+  [[ -d "$(avd_dir)" ]] && return 0
+  [[ -d "$(image_dir)" ]] || die "system image missing — install it: sdkmanager \"$POOL_IMAGE\""
+  [[ -x "$AVDMANAGER" ]] || die "avdmanager not found at $AVDMANAGER — install the SDK command-line tools"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    say "[dry-run] would create AVD $POOL_AVD ($POOL_IMAGE, $DEVICE_PROFILE) with a hardware keyboard, 2 GB RAM, 4 cores"
+    return 0
+  fi
+  say "creating AVD $POOL_AVD ($POOL_IMAGE)"
+  "$AVDMANAGER" create avd -n "$POOL_AVD" -k "$POOL_IMAGE" -d "$DEVICE_PROFILE" <<<"no" >/dev/null
+  set_config hw.keyboard yes          # with a hardware keyboard the soft IME stays hidden
+  set_config hw.ramSize 2048
+  set_config hw.cpu.ncore 4
+  set_config disk.dataPartition.size 6G
+  set_config showDeviceFrame no
+}
+
+# The marker that makes every emulock component treat this AVD as a pool AVD:
+# plain claims skip it, reap shuts down unowned instances, the guard holds its
+# snapshot boots to -no-window.
+mark_pool_avd() { [[ "$DRY_RUN" == 1 ]] || : > "$(avd_dir)/emulock-pool"; }
+
+pool_in_use() { # 0 = some instance of the pool AVD is claimed or running
+  local d serial
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -f "$d/meta" ]] && grep -qx "AVD=$POOL_AVD" "$d/meta" && return 0
+  done
+  for serial in $(adb devices 2>/dev/null | awk 'NR > 1 && $1 ~ /^emulator-/ {print $1}'); do
+    [[ "$(adb -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')" == "$POOL_AVD" ]] && return 0
+  done
+  return 1
+}
+
+wait_for_boot() {
+  local i
+  for i in $(seq 1 180); do
+    [[ "$(adb -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]] && return 0
+    [[ -n "$EMU_PID" ]] && ! kill -0 "$EMU_PID" 2>/dev/null && die "the emulator exited during boot"
+    sleep 2
+  done
+  die "$SERIAL did not finish booting in 6 minutes"
+}
+
+write_golden_record() { # what was baked, from where — doctor reads it to warn when it goes stale
+  local commit="unknown" apk_sha=""
+  if [[ -n "$APK" ]]; then
+    commit="$(git -C "$(dirname "$APK")" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    apk_sha="$(shasum -a 256 "$APK" 2>/dev/null | cut -d' ' -f1 || true)"
+  fi
+  printf '{"baked_at": "%s", "commit": "%s", "apk_sha256": "%s", "image": "%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$commit" "$apk_sha" "$POOL_IMAGE" > "$(golden_record)"
+}
+
+remove_rebake_checkout() {
+  [[ -n "$REBAKE_DIR" && -d "$REBAKE_DIR" ]] || return 0
+  git -C "$PROJECT_ROOT" worktree remove "$REBAKE_DIR" >/dev/null 2>&1 \
+    || echo "emulock pool: could not remove the rebake checkout $REBAKE_DIR — remove it by hand" >&2
+}
+
+on_exit() { cleanup; remove_rebake_checkout; }
+
+cleanup() { # on any exit before the bake finished: never leave a writable pool AVD running
+  [[ "$DONE" == 1 || -z "$SERIAL" ]] && return 0
+  echo "emulock pool: bake did not finish — shutting $SERIAL down and releasing it; '$POOL_SNAPSHOT' was not changed" >&2
+  adb -s "$SERIAL" emu kill >/dev/null 2>&1 || true
+  [[ -n "$EMU_PID" ]] && wait "$EMU_PID" 2>/dev/null || true
+  protect_snapshot || true
+  "$LOCK" release "$SERIAL" >/dev/null 2>&1 || true
+}
+
+setup_device() {
+  local locale
+  locale="$(dev_sh getprop persist.sys.locale)"
+  [[ -n "$locale" ]] || locale="$(dev_sh getprop ro.product.locale)"
+  if [[ "$LOCALE" != any && "$locale" != "$LOCALE" ]]; then
+    die "the image boots in '$locale', not $LOCALE (set locale = any in .emulock/config to accept it)"
+  fi
+  dev_sh settings put global private_dns_mode off
+  dev_sh settings put global window_animation_scale 0
+  dev_sh settings put global transition_animation_scale 0
+  dev_sh settings put global animator_duration_scale 0
+  dev_sh svc power stayon true
+  dev_sh settings put system screen_off_timeout 2147483647
+  dev_sh locksettings set-disabled true >/dev/null || true   # already off on a fresh image
+  dev_sh wm dismiss-keyguard
+  # hw.keyboard alone does not keep the IME away; this does.
+  dev_sh settings put secure show_ime_with_hard_keyboard 0
+}
+
+setup_app() {
+  local hook
+  if [[ -n "$APK" ]]; then
+    say "installing $(basename "$APK")"
+    dev install -r "$APK" >/dev/null
+  fi
+  hook="$(abs_in "$PROJECT_ROOT" "$SETUP")"
+  if [[ -f "$hook" ]]; then
+    say "running the project's setup hook: $hook"
+    EMULOCK_SERIAL="$SERIAL" EMULOCK_APK="$APK" ANDROID_SERIAL="$SERIAL" /bin/bash "$hook" "$SERIAL" \
+      || die "the setup hook failed: $hook"
+  fi
+  dev_sh input keyevent 3
+}
+
+verify() { # the snapshot is only saved if the doctor agrees the device is clean
+  local report built_in
+  # Compare against the checkout that built the APK (a rebake builds in a throwaway one).
+  built_in="$PROJECT_ROOT"
+  [[ -n "$APK" ]] && built_in="$(git -C "$(dirname "$APK")" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_ROOT")"
+  report="$("$LOCK" doctor "$SERIAL" --json --worktree "$built_in" || true)"
+  "$LOCK" doctor "$SERIAL" --worktree "$built_in" || true
+  python3 - "$report" "$VERIFY" <<'PY'
+import json, sys
+required = set(sys.argv[2].split())
+try:
+    checks = json.loads(sys.argv[1])["checks"]
+except (ValueError, KeyError):
+    sys.exit("emulock pool: not saving the snapshot — the doctor produced no report")
+bad = [f"{c['name']}: {c['detail']}" for c in checks if c["name"] in required and c["status"] != "ok"]
+missing = required - {c["name"] for c in checks}
+if missing:
+    bad.append("checks that did not run: " + ", ".join(sorted(missing)))
+if bad:
+    sys.exit("emulock pool: not saving the snapshot — " + "; ".join(bad))
+PY
+}
+
+cmd_bake() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --apk) APK="$2"; shift 2 ;;
+    *) die "bake: unknown option $1" ;;
+    esac
+  done
+  [[ -z "$APK" && -n "$CONF_APK" ]] && APK="$(abs_in "$PROJECT_ROOT" "$CONF_APK")"
+  if [[ -n "$APK" ]]; then
+    [[ -f "$APK" ]] || die "no APK at $APK — build it${BUILD:+ ($BUILD)}, or pass --apk"
+    APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
+  fi
+  create_avd
+  pool_in_use && die "pool instances are claimed or running — release them first (emulock status); a writable boot would fight them"
+  mark_pool_avd
+
+  # --additional: `claim --avd` alone hands back a lock this session already holds.
+  local claim_out
+  if [[ "$DRY_RUN" == 1 ]]; then
+    "$LOCK" --dry-run claim --additional --avd "$POOL_AVD" --note "pool bake"
+    say "[dry-run] would cold-boot headless, set up the device${APK:+, install $(basename "$APK")}, run $(abs_in "$PROJECT_ROOT" "$SETUP") if present,"
+    say "[dry-run] verify ($VERIFY) with emulock doctor, save '$POOL_SNAPSHOT', shut down, release"
+    return 0
+  fi
+  claim_out="$("$LOCK" claim --additional --avd "$POOL_AVD" --note "pool bake")"
+  SERIAL="$(sed -n 's/^claimed: \(emulator-[0-9]*\).*/\1/p' <<<"$claim_out")"
+  [[ -n "$SERIAL" ]] || die "could not read the claimed serial from: $claim_out"
+  trap on_exit EXIT
+
+  say "cold-booting $POOL_AVD on $SERIAL (headless)"
+  # -no-snapshot-save: the only snapshot this boot writes is the explicit one below.
+  # -no-window and no -gpu flag, exactly like the pool boot: a snapshot only loads
+  # under the GPU setup it was saved with.
+  "$EMU_BIN" @"$POOL_AVD" -port "${SERIAL#emulator-}" -no-snapshot-load -no-snapshot-save -no-boot-anim -no-window \
+    >/dev/null 2>&1 &
+  EMU_PID=$!
+  wait_for_boot   # polls, and notices if the emulator dies instead of hanging in wait-for-device
+  say "booted — applying device setup"
+  setup_device
+  setup_app
+  sleep 2   # let the launcher take focus before the on-top check
+  verify
+  say "saving snapshot '$POOL_SNAPSHOT'"
+  local saved
+  unprotect_snapshot   # the save replaces it; read-only again once the emulator is down
+  saved="$(dev emu avd snapshot save "$POOL_SNAPSHOT" | tr -d '\r')"
+  [[ "$saved" == *OK* && -d "$(snapshot_dir)" ]] || die "snapshot save failed: $saved"
+  write_golden_record
+  dev emu kill >/dev/null 2>&1 || true
+  wait "$EMU_PID" 2>/dev/null || true
+  protect_snapshot
+  "$LOCK" release "$SERIAL" >/dev/null
+  DONE=1
+  say "done — agents can now: emulock claim --pool"
+}
+
+cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
+  [[ -n "$BUILD" ]] || die "rebake: set pool.build in .emulock/config (the command that builds the pool APK)"
+  [[ -n "$CONF_APK" ]] || die "rebake: set pool.apk in .emulock/config (where that build puts the APK)"
+  pool_in_use && die "pool instances are claimed or running — rebake when the pool is idle (emulock status)"
+  local dir log remote="${REF%%/*}" branch="${REF#*/}"
+  dir="$(mktemp -d -t emulock-rebake)"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    rmdir "$dir"
+    say "[dry-run] would fetch $REF, check it out detached in a temporary directory, run: $BUILD"
+    say "[dry-run] then bake the golden phone from $CONF_APK (recording golden.json), and remove the checkout"
+    return 0
+  fi
+  rmdir "$dir"
+  [[ "$remote" != "$REF" ]] && git -C "$PROJECT_ROOT" fetch -q "$remote" "$branch"
+  git -C "$PROJECT_ROOT" worktree add -q --detach "$dir" "$REF"
+  REBAKE_DIR="$dir"
+  trap on_exit EXIT
+  # Android builds need the SDK path, which lives in an untracked file.
+  [[ -f "$PROJECT_ROOT/local.properties" ]] && cp "$PROJECT_ROOT/local.properties" "$dir/"
+  log="$(mktemp -t emulock-rebake-log)"
+  say "building $REF ($(git -C "$dir" rev-parse --short HEAD)) — a cold build takes a few minutes; log: $log"
+  (cd "$dir" && /bin/bash -c "$BUILD") >"$log" 2>&1 \
+    || { tail -n 20 "$log" >&2; die "the build failed — full log: $log"; }
+  cmd_bake --apk "$(abs_in "$dir" "$CONF_APK")"
+}
+
+cmd_status() {
+  if [[ ! -d "$(avd_dir)" ]]; then
+    echo "agent pool: no AVD $POOL_AVD yet — emulock pool bake"
+    return 0
+  fi
+  local snap claimed=0 d
+  snap="$(snapshot_dir)"
+  for d in "$LOCK_ROOT"/emulator-*; do
+    [[ -f "$d/meta" ]] && grep -qx "POOL=1" "$d/meta" && claimed=$((claimed + 1))
+  done
+  echo "agent pool: AVD $POOL_AVD ($(sed -n 's|^image\.sysdir\.1 *= *system-images/\([^/]*\)/\([^/]*\)/.*|\1 \2|p' "$(avd_dir)/config.ini"))"
+  if [[ -d "$snap" ]]; then
+    echo "  snapshot '$POOL_SNAPSHOT': $(du -sh "$snap" | cut -f1)"
+    [[ -w "$snap" ]] && echo "  snapshot '$POOL_SNAPSHOT' is writable: a boot that cannot load it deletes it (the next bake makes it read-only)"
+  else
+    echo "  snapshot '$POOL_SNAPSHOT': missing — emulock pool bake"
+  fi
+  if [[ -f "$(golden_record)" ]]; then
+    local baked commit age
+    baked="$(sed -n 's/.*"baked_at": "\([^"]*\)".*/\1/p' "$(golden_record)")"
+    commit="$(sed -n 's/.*"commit": "\([^"]*\)".*/\1/p' "$(golden_record)")"
+    age="$(python3 -c 'import sys, datetime as d; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print((d.datetime.now(d.timezone.utc) - t).days)' "$baked" 2>/dev/null || echo "?")"
+    echo "  golden: baked from $commit, $age day(s) old (refresh: emulock pool rebake)"
+  fi
+  echo "  claimed: $claimed/$POOL_MAX   (emulock status for owners)"
+}
+
+main() {
+  local args=() a cmd=""
+  for a in "$@"; do
+    case "$a" in
+    --help|-h) usage; exit 0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) args+=("$a") ;;
+    esac
+  done
+  set -- ${args[@]+"${args[@]}"}
+  cmd="${1:-}"
+  [[ -n "$cmd" ]] || { usage; exit 1; }
+  shift
+  command -v adb >/dev/null 2>&1 || die "adb not on PATH"
+  case "$cmd" in
+  bake) cmd_bake "$@" ;;
+  rebake) cmd_rebake "$@" ;;
+  status) cmd_status "$@" ;;
+  *) die "unknown command: $cmd (bake|rebake|status)" ;;
+  esac
+}
+
+main "$@"

@@ -4,7 +4,10 @@
 # python3, both already required to run the tools themselves. No bats, no pip.
 #
 #   tests/run.sh              # run everything
-#   tests/run.sh guard        # run one group (guard|state|lock|shells)
+#   tests/run.sh guard        # run one group (shells|guard|state|lock|py)
+#
+# `py` runs the unittest suites next to this file (pool, guard rules, doctor,
+# evidence, CLI). They need nothing but python3 either.
 #
 # Every test runs against a scratch EMULATOR_LOCK_DIR under $TMPDIR. Nothing
 # here reads or writes the real ~/.emulator-locks, so it is safe to run while
@@ -23,6 +26,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 GUARD="$ROOT/hooks/claude-code/emulock-guard.sh"
 LOCK="$ROOT/bin/emulock"
 LAB="$ROOT/libexec/device_lab.py"
+POOL_SH="$ROOT/libexec/emulock-pool.sh"
 
 PASS=0
 FAIL=0
@@ -94,10 +98,15 @@ test_shells() {
         || bad "guard parses under $sh ($v)" "clean parse" "syntax error"
       "$sh" -n "$LOCK" 2>/dev/null && ok "lock parses under $sh ($v)" \
         || bad "lock parses under $sh ($v)" "clean parse" "syntax error"
+      "$sh" -n "$POOL_SH" 2>/dev/null && ok "pool parses under $sh ($v)" \
+        || bad "pool parses under $sh ($v)" "clean parse" "syntax error"
     fi
   done
-  python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$LAB" \
-    && ok "device-lab.py parses" || bad "device-lab.py parses" "clean parse" "syntax error"
+  local py
+  for py in "$ROOT"/libexec/*.py; do
+    python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$py" \
+      && ok "$(basename "$py") parses" || bad "$(basename "$py") parses" "clean parse" "syntax error"
+  done
 }
 
 # =============================================================================
@@ -296,7 +305,7 @@ test_lock() {
 
   group "emulock doctor (read-only diagnostics)"
   local probe; probe="$(mktemp -d)"
-  out="$(cd "$probe" && EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
+  out="$(cd "$probe" && HOME="$probe" EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
          "$LOCK" doctor 2>&1)"
   has "doctor finds the guard"          "$out" "guard hook present"
   has "doctor checks for jq"            "$out" "jq"
@@ -310,7 +319,7 @@ test_lock() {
   # doctor must never mutate anything -- an agent is expected to run it freely.
   local before after
   before="$(ls -R "$STORE" 2>/dev/null; cat "$STORE"/*/meta 2>/dev/null)"
-  (cd "$probe" && EMULATOR_LOCK_DIR="$STORE" "$LOCK" doctor >/dev/null 2>&1) || true
+  (cd "$probe" && HOME="$probe" EMULATOR_LOCK_DIR="$STORE" "$LOCK" doctor >/dev/null 2>&1) || true
   after="$(ls -R "$STORE" 2>/dev/null; cat "$STORE"/*/meta 2>/dev/null)"
   is "doctor changes nothing" "$after" "$before"
 
@@ -318,7 +327,7 @@ test_lock() {
   mkdir -p "$probe/.claude"
   printf '{"hooks":{"PreToolUse":[{"hooks":[{"command":"x/emulock-guard.sh"}]}]}}\n' \
     >"$probe/.claude/settings.json"
-  out="$(cd "$probe" && EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
+  out="$(cd "$probe" && HOME="$probe" EMULATOR_LOCK_DIR="$STORE" CLAUDE_CODE_SESSION_ID="$SESSION" \
          "$LOCK" doctor 2>&1)"
   has "doctor detects a wired hook" "$out" "wired into"
   rm -rf "$probe"
@@ -326,16 +335,30 @@ test_lock() {
 }
 
 # =============================================================================
+test_py() {
+  group "python suites (tests/test_*.py)"
+  local suite out
+  for suite in "$HERE"/test_*.py; do
+    if out="$(python3 "$suite" 2>&1)"; then
+      ok "$(basename "$suite") ($(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9]*\) tests.*/\1/p') tests)"
+    else
+      bad "$(basename "$suite")" "all tests pass" "$(printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):' | head -5 | tr '\n' ' ')"
+    fi
+  done
+}
+
+# =============================================================================
 main() {
   local want="${1:-all}"
   printf '\033[1memulator-lock test suite\033[0m  (%s)\n' "$ROOT"
   case "$want" in
-    all)    test_shells; test_guard; test_state; test_lock ;;
+    all)    test_shells; test_guard; test_state; test_lock; test_py ;;
     shells) test_shells ;;
     guard)  setup_store; test_guard ;;
     state)  test_state ;;
     lock)   test_lock ;;
-    *) echo "unknown group: $want (all|shells|guard|state|lock)"; exit 2 ;;
+    py)     test_py ;;
+    *) echo "unknown group: $want (all|shells|guard|state|lock|py)"; exit 2 ;;
   esac
   printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
   if (( FAIL )); then
