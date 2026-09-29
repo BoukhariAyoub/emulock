@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# emulock — the pre-0.3 name of emuriad. Runs emuriad with the same arguments.
+#
+# Kept so hooks, scripts and habits written for emulock keep working. It says so
+# once per call on stderr, except for `guard`: the hook runs before every shell
+# command, and a notice there would be noise in every session.
+
+# The emuriad next to this link first (Homebrew's bin/, install.sh's prefix), so
+# `emulock init` still links the skill through the unversioned path; then the one
+# next to the file the link resolves to (a checkout linked by an older install.sh).
+src="${BASH_SOURCE[0]}"
+target="$(cd "$(dirname "$src")" && pwd)/emuriad"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  [[ "$src" == /* ]] || src="$dir/$src"
+done
+[[ -x "$target" ]] || target="$(cd -P "$(dirname "$src")" && pwd)/emuriad"
+[[ -x "$target" ]] || target="$(command -v emuriad 2>/dev/null)" \
+  || { echo "emulock: emuriad not found — brew install boukhariayoub/emuriad/emuriad" >&2; exit 127; }
+
+[[ "${1:-}" == guard ]] || echo "emulock: renamed to emuriad — run 'emuriad ${1:-<command>}' instead (this shim goes away in a later release)" >&2
+exec "$target" "$@"

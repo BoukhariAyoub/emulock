@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# emulock-lab — the pre-0.3 name of emuriad-lab. Runs it with the same arguments.
+
+src="${BASH_SOURCE[0]}"
+target="$(cd "$(dirname "$src")" && pwd)/emuriad-lab"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  [[ "$src" == /* ]] || src="$dir/$src"
+done
+[[ -x "$target" ]] || target="$(cd -P "$(dirname "$src")" && pwd)/emuriad-lab"
+[[ -x "$target" ]] || target="$(command -v emuriad-lab 2>/dev/null)" \
+  || { echo "emulock-lab: emuriad-lab not found — brew install boukhariayoub/emuriad/emuriad" >&2; exit 127; }
+
+echo "emulock-lab: renamed to emuriad-lab — run that instead (this shim goes away in a later release)" >&2
+exec "$target" "$@"
