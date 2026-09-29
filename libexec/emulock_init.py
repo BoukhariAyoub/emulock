@@ -78,6 +78,12 @@ def confirm(question: str, assume_yes: bool) -> bool:
 def install_skill(source: Path | None, target: Path, copy: bool, dry_run: bool) -> str:
     if source is None or not source.is_dir():
         return "skill: not found in this install — skipped"
+    if target.is_symlink() and not copy and Path(os.readlink(target)) != source:
+        # An older link (e.g. into a versioned Cellar dir): point it at the stable path.
+        if not dry_run:
+            target.unlink()
+            target.symlink_to(source)
+        return f"skill: {'would relink' if dry_run else 'relinked'} {target} -> {source}"
     if target.is_symlink() and target.resolve() == source.resolve():
         return f"skill: already linked at {target}"
     if target.exists() or target.is_symlink():

@@ -159,6 +159,40 @@ class CliTest(unittest.TestCase):
         self.assertIn("already", again.stdout)
         self.assertEqual(settings, self.settings())
 
+    def homebrew_layout(self) -> Path:
+        """A Cellar keg plus the prefix symlinks Homebrew makes for it; returns prefix/bin/emulock."""
+        keg = self.tmp / "Cellar" / "emulock" / "9.9.9"
+        shutil.copytree(ROOT / "bin", keg / "bin")
+        shutil.copytree(ROOT / "libexec", keg / "libexec", ignore=shutil.ignore_patterns("__pycache__"))
+        (keg / "share" / "emulock").mkdir(parents=True)
+        shutil.copytree(ROOT / "hooks", keg / "share" / "emulock" / "hooks")
+        shutil.copytree(ROOT / "skills", keg / "share" / "emulock" / "skills")
+        prefix = self.tmp / "prefix"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "share").mkdir()
+        (prefix / "bin" / "emulock").symlink_to("../../Cellar/emulock/9.9.9/bin/emulock")
+        (prefix / "share" / "emulock").symlink_to("../../Cellar/emulock/9.9.9/share/emulock")
+        return prefix / "bin" / "emulock"
+
+    def test_init_links_the_skill_through_the_unversioned_prefix(self):
+        emulock = self.homebrew_layout()
+        out = subprocess.run(["/bin/bash", str(emulock), "init", "--yes", "--no-hook"], cwd=self.repo,
+                             capture_output=True, text=True, env=self.env)
+        self.assertEqual(0, out.returncode, out.stderr)
+        link = os.readlink(self.home / ".claude" / "skills" / "emulock")
+        self.assertIn("prefix/share/emulock/skills/emulock", link)
+        self.assertNotIn("9.9.9", link)  # an upgrade removes the versioned keg
+
+    def test_init_relinks_a_skill_left_pointing_into_an_old_keg(self):
+        emulock = self.homebrew_layout()
+        skills = self.home / ".claude" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "emulock").symlink_to(self.tmp / "Cellar" / "emulock" / "0.1.0" / "share" / "emulock" / "skills" / "emulock")
+        out = subprocess.run(["/bin/bash", str(emulock), "init", "--yes", "--no-hook"], cwd=self.repo,
+                             capture_output=True, text=True, env=self.env)
+        self.assertIn("relinked", out.stdout)
+        self.assertTrue((skills / "emulock" / "SKILL.md").is_file())
+
     def test_init_project_copies_the_skill_and_uses_the_path_command(self):
         out = self.run_cli("init", "--project", "--yes")
         self.assertEqual(0, out.returncode, out.stderr)

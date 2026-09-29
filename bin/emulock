@@ -84,7 +84,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 BOOT_GRACE=600
@@ -909,9 +909,14 @@ cmd_evidence() {
 }
 
 cmd_init() {
-  local py
+  local py invoked skill
   py="$(libexec_path emulock_init.py)" || die "init: libexec/emulock_init.py is missing — reinstall emulock"
-  EMULOCK_BIN="$SELF" EMULOCK_SKILL_DIR="$(share_path skills/emulock || true)" exec python3 "$py" "$@"
+  # Link the skill through the path emulock was invoked by, when that has a share
+  # dir (Homebrew: /opt/homebrew/share/emulock). The resolved path is versioned
+  # (Cellar/emulock/0.2.0/...), and an upgrade would leave the link dangling.
+  invoked="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  skill="$(first_existing "$invoked/../share/emulock/skills/emulock" || share_path skills/emulock || true)"
+  EMULOCK_BIN="$SELF" EMULOCK_SKILL_DIR="$skill" exec python3 "$py" "$@"
 }
 
 main() {
