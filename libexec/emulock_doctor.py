@@ -169,8 +169,9 @@ def check_golden(device: Device, max_age_days: int) -> Check | None:
     if meta.get("POOL") != "1":
         return None
     avd_dir = common.AVD_HOME / f"{meta.get('AVD', '')}.avd"
-    record = avd_dir / "golden.json"
-    snapshot = avd_dir / "snapshots" / "golden"
+    name = meta.get("POOL_SNAPSHOT") or "golden"   # golden-window for claim --pool --window
+    record = avd_dir / f"{name}.json"
+    snapshot = avd_dir / "snapshots" / name
     commit = ""
     if record.is_file():
         try:
@@ -182,15 +183,16 @@ def check_golden(device: Device, max_age_days: int) -> Check | None:
     elif snapshot.is_dir():
         baked = snapshot.stat().st_mtime
     else:
-        return Check("golden", WARN, "no golden snapshot found for this pool instance", fix="emulock pool bake")
+        return Check("golden", WARN, f"no '{name}' snapshot found for this pool instance",
+                     fix="emulock pool bake" + (" --window" if name == "golden-window" else ""))
     age = int((time.time() - baked) // 86400)
     source = f" from {commit}" if commit and commit != "unknown" else ""
     if age > max_age_days:
         return Check("golden", WARN,
-                     f"the golden phone is {age} days old{source} — installs over it get slower and its app data "
+                     f"'{name}' is {age} days old{source} — installs over it get slower and its app data "
                      "drifts from what the code expects",
                      fix="emulock pool rebake when the pool is idle")
-    return Check("golden", OK, f"golden phone baked {age} day(s) ago{source}")
+    return Check("golden", OK, f"'{name}' baked {age} day(s) ago{source}")
 
 
 # --- the installed build -------------------------------------------------------------

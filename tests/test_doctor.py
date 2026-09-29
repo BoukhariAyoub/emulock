@@ -182,7 +182,7 @@ class DoctorTest(unittest.TestCase):
         self.pool_instance(baked_days_ago=1)
         by_name, *_ = self.run_doctor(**{"emu avd name": "agent_pool\nOK"})
         self.assertEqual("ok", by_name["golden"].status)
-        self.assertIn("1 day(s) ago from 427b4ed", by_name["golden"].detail)
+        self.assertIn("'golden' baked 1 day(s) ago from 427b4ed", by_name["golden"].detail)
 
     def test_a_stale_golden_phone_warns_with_the_rebake_fix(self):
         self.pool_instance(baked_days_ago=10)
@@ -195,6 +195,15 @@ class DoctorTest(unittest.TestCase):
         self.pool_instance(baked_days_ago=9, record=False)
         by_name, *_ = self.run_doctor(**{"emu avd name": "agent_pool\nOK"})
         self.assertEqual("warn", by_name["golden"].status)
+
+    def test_a_windowed_instance_reports_golden_window(self):
+        self.pool_instance(baked_days_ago=None)
+        meta = self.locks / SERIAL / "meta"
+        meta.write_text(meta.read_text() + "POOL_SNAPSHOT=golden-window\n")
+        by_name, *_ = self.run_doctor(**{"emu avd name": "agent_pool\nOK"})
+        self.assertEqual("warn", by_name["golden"].status)  # only golden exists on disk
+        self.assertIn("'golden-window'", by_name["golden"].detail)
+        self.assertEqual("emulock pool bake --window", by_name["golden"].fix)
 
     def test_a_named_avd_gets_no_golden_check(self):
         by_name, *_ = self.run_doctor()

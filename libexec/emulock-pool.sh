@@ -18,8 +18,13 @@
 #
 # Usage:
 #   emulock pool status
-#   emulock pool bake [--apk PATH] [--dry-run]
+#   emulock pool bake [--window] [--apk PATH] [--dry-run]
 #   emulock pool rebake [--dry-run]     bake from a fresh build of pool.ref in a throwaway checkout
+#
+# --window bakes `golden-window` instead of `golden`: the same setup, saved from
+# a boot with a window, for `claim --pool --window` (a device someone can
+# watch). A window opens on the screen while it bakes. rebake refreshes
+# golden-window too once it exists.
 #
 # bake creates the AVD if missing, claims it writable by name, cold-boots it
 # headless, applies the setup, checks the result with `emulock doctor` and only
@@ -56,6 +61,9 @@ AVDMANAGER="$SDK/cmdline-tools/latest/bin/avdmanager"
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 POOL_SNAPSHOT="golden"
+POOL_SNAPSHOT_WINDOW="golden-window"
+SNAP="$POOL_SNAPSHOT"   # the snapshot this bake writes
+WINDOW=0
 LOCK="${EMULOCK_BIN:-emulock}"
 
 DRY_RUN="${EMULOCK_DRY_RUN:-0}"
@@ -106,8 +114,8 @@ abs_in() { # abs_in <root> <path>: <path> as given if absolute, else under <root
 }
 
 avd_dir() { echo "$AVD_HOME/$POOL_AVD.avd"; }
-snapshot_dir() { echo "$(avd_dir)/snapshots/$POOL_SNAPSHOT"; }
-golden_record() { echo "$(avd_dir)/golden.json"; }
+snapshot_dir() { echo "$(avd_dir)/snapshots/${1:-$SNAP}"; }
+golden_record() { echo "$(avd_dir)/${1:-$SNAP}.json"; }
 dev() { adb -s "$SERIAL" "$@"; }
 dev_sh() { adb -s "$SERIAL" shell "$@" | tr -d '\r'; }
 
@@ -192,7 +200,7 @@ on_exit() { cleanup; remove_rebake_checkout; }
 
 cleanup() { # on any exit before the bake finished: never leave a writable pool AVD running
   [[ "$DONE" == 1 || -z "$SERIAL" ]] && return 0
-  echo "emulock pool: bake did not finish — shutting $SERIAL down and releasing it; '$POOL_SNAPSHOT' was not changed" >&2
+  echo "emulock pool: bake did not finish — shutting $SERIAL down and releasing it; '$SNAP' was not changed" >&2
   adb -s "$SERIAL" emu kill >/dev/null 2>&1 || true
   [[ -n "$EMU_PID" ]] && wait "$EMU_PID" 2>/dev/null || true
   protect_snapshot || true
@@ -257,9 +265,11 @@ PY
 }
 
 cmd_bake() {
+  SERIAL=""; EMU_PID=""; DONE=0; WINDOW=0; SNAP="$POOL_SNAPSHOT"
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --apk) APK="$2"; shift 2 ;;
+    --window) WINDOW=1; SNAP="$POOL_SNAPSHOT_WINDOW"; shift ;;
     *) die "bake: unknown option $1" ;;
     esac
   done
@@ -276,8 +286,8 @@ cmd_bake() {
   local claim_out
   if [[ "$DRY_RUN" == 1 ]]; then
     "$LOCK" --dry-run claim --additional --avd "$POOL_AVD" --note "pool bake"
-    say "[dry-run] would cold-boot headless, set up the device${APK:+, install $(basename "$APK")}, run $(abs_in "$PROJECT_ROOT" "$SETUP") if present,"
-    say "[dry-run] verify ($VERIFY) with emulock doctor, save '$POOL_SNAPSHOT', shut down, release"
+    say "[dry-run] would cold-boot $( ((WINDOW)) && echo 'with a window' || echo headless), set up the device${APK:+, install $(basename "$APK")}, run $(abs_in "$PROJECT_ROOT" "$SETUP") if present,"
+    say "[dry-run] verify ($VERIFY) with emulock doctor, save '$SNAP', shut down, release"
     return 0
   fi
   claim_out="$("$LOCK" claim --additional --avd "$POOL_AVD" --note "pool bake")"
@@ -285,11 +295,18 @@ cmd_bake() {
   [[ -n "$SERIAL" ]] || die "could not read the claimed serial from: $claim_out"
   trap on_exit EXIT
 
-  say "cold-booting $POOL_AVD on $SERIAL (headless)"
   # -no-snapshot-save: the only snapshot this boot writes is the explicit one below.
-  # -no-window and no -gpu flag, exactly like the pool boot: a snapshot only loads
-  # under the GPU setup it was saved with.
-  "$EMU_BIN" @"$POOL_AVD" -port "${SERIAL#emulator-}" -no-snapshot-load -no-snapshot-save -no-boot-anim -no-window \
+  # No -gpu flag, and the same window setting as the pool boot that will load it:
+  # a snapshot only loads under the renderer and features it was saved with.
+  local display="-no-window"
+  if (( WINDOW )); then
+    display=""
+    say "cold-booting $POOL_AVD on $SERIAL with a window (it closes when the bake is done)"
+  else
+    say "cold-booting $POOL_AVD on $SERIAL (headless)"
+  fi
+  # shellcheck disable=SC2086  # $display is one flag or none
+  "$EMU_BIN" @"$POOL_AVD" -port "${SERIAL#emulator-}" -no-snapshot-load -no-snapshot-save -no-boot-anim $display \
     >/dev/null 2>&1 &
   EMU_PID=$!
   wait_for_boot   # polls, and notices if the emulator dies instead of hanging in wait-for-device
@@ -298,10 +315,10 @@ cmd_bake() {
   setup_app
   sleep 2   # let the launcher take focus before the on-top check
   verify
-  say "saving snapshot '$POOL_SNAPSHOT'"
+  say "saving snapshot '$SNAP'"
   local saved
   unprotect_snapshot   # the save replaces it; read-only again once the emulator is down
-  saved="$(dev emu avd snapshot save "$POOL_SNAPSHOT" | tr -d '\r')"
+  saved="$(dev emu avd snapshot save "$SNAP" | tr -d '\r')"
   [[ "$saved" == *OK* && -d "$(snapshot_dir)" ]] || die "snapshot save failed: $saved"
   write_golden_record
   dev emu kill >/dev/null 2>&1 || true
@@ -309,7 +326,11 @@ cmd_bake() {
   protect_snapshot
   "$LOCK" release "$SERIAL" >/dev/null
   DONE=1
-  say "done — agents can now: emulock claim --pool"
+  if (( WINDOW )); then
+    say "done — a watchable device is now: emulock claim --pool --window"
+  else
+    say "done — agents can now: emulock claim --pool"
+  fi
 }
 
 cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
@@ -321,7 +342,7 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
   if [[ "$DRY_RUN" == 1 ]]; then
     rmdir "$dir"
     say "[dry-run] would fetch $REF, check it out detached in a temporary directory, run: $BUILD"
-    say "[dry-run] then bake the golden phone from $CONF_APK (recording golden.json), and remove the checkout"
+    say "[dry-run] then bake the golden phone from $CONF_APK (recording golden.json)$([[ -d "$(snapshot_dir "$POOL_SNAPSHOT_WINDOW")" ]] && echo ', then golden-window with a window'), and remove the checkout"
     return 0
   fi
   rmdir "$dir"
@@ -335,7 +356,13 @@ cmd_rebake() { # bake from a fresh build of pool.ref, in a throwaway checkout
   say "building $REF ($(git -C "$dir" rev-parse --short HEAD)) — a cold build takes a few minutes; log: $log"
   (cd "$dir" && /bin/bash -c "$BUILD") >"$log" 2>&1 \
     || { tail -n 20 "$log" >&2; die "the build failed — full log: $log"; }
-  cmd_bake --apk "$(abs_in "$dir" "$CONF_APK")"
+  local apk had_window=0
+  apk="$(abs_in "$dir" "$CONF_APK")"
+  [[ -d "$(snapshot_dir "$POOL_SNAPSHOT_WINDOW")" ]] && had_window=1
+  cmd_bake --apk "$apk"
+  # golden-window, once someone has baked one, goes stale exactly like golden.
+  (( had_window )) && cmd_bake --window --apk "$apk"
+  return 0
 }
 
 cmd_status() {
@@ -343,25 +370,31 @@ cmd_status() {
     echo "agent pool: no AVD $POOL_AVD yet — emulock pool bake"
     return 0
   fi
-  local snap claimed=0 d
-  snap="$(snapshot_dir)"
+  local snap claimed=0 d name how
   for d in "$LOCK_ROOT"/emulator-*; do
     [[ -f "$d/meta" ]] && grep -qx "POOL=1" "$d/meta" && claimed=$((claimed + 1))
   done
   echo "agent pool: AVD $POOL_AVD ($(sed -n 's|^image\.sysdir\.1 *= *system-images/\([^/]*\)/\([^/]*\)/.*|\1 \2|p' "$(avd_dir)/config.ini"))"
-  if [[ -d "$snap" ]]; then
-    echo "  snapshot '$POOL_SNAPSHOT': $(du -sh "$snap" | cut -f1)"
-    [[ -w "$snap" ]] && echo "  snapshot '$POOL_SNAPSHOT' is writable: a boot that cannot load it deletes it (the next bake makes it read-only)"
-  else
-    echo "  snapshot '$POOL_SNAPSHOT': missing — emulock pool bake"
-  fi
-  if [[ -f "$(golden_record)" ]]; then
-    local baked commit age
-    baked="$(sed -n 's/.*"baked_at": "\([^"]*\)".*/\1/p' "$(golden_record)")"
-    commit="$(sed -n 's/.*"commit": "\([^"]*\)".*/\1/p' "$(golden_record)")"
-    age="$(python3 -c 'import sys, datetime as d; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print((d.datetime.now(d.timezone.utc) - t).days)' "$baked" 2>/dev/null || echo "?")"
-    echo "  golden: baked from $commit, $age day(s) old (refresh: emulock pool rebake)"
-  fi
+  for name in "$POOL_SNAPSHOT" "$POOL_SNAPSHOT_WINDOW"; do
+    snap="$(snapshot_dir "$name")"
+    how="headless: emulock claim --pool"
+    [[ "$name" == "$POOL_SNAPSHOT_WINDOW" ]] && how="with a window: emulock claim --pool --window"
+    if [[ -d "$snap" ]]; then
+      echo "  snapshot '$name' ($how): $(du -sh "$snap" | cut -f1)"
+      [[ -w "$snap" ]] && echo "    writable: a boot that cannot load it deletes it (the next bake makes it read-only)"
+      if [[ -f "$(golden_record "$name")" ]]; then
+        local baked commit age
+        baked="$(sed -n 's/.*"baked_at": "\([^"]*\)".*/\1/p' "$(golden_record "$name")")"
+        commit="$(sed -n 's/.*"commit": "\([^"]*\)".*/\1/p' "$(golden_record "$name")")"
+        age="$(python3 -c 'import sys, datetime as d; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print((d.datetime.now(d.timezone.utc) - t).days)' "$baked" 2>/dev/null || echo "?")"
+        echo "    baked from $commit, $age day(s) old (refresh: emulock pool rebake)"
+      fi
+    elif [[ "$name" == "$POOL_SNAPSHOT" ]]; then
+      echo "  snapshot '$name': missing — emulock pool bake"
+    else
+      echo "  snapshot '$name': not baked (for a watchable device: emulock pool bake --window)"
+    fi
+  done
   echo "  claimed: $claimed/$POOL_MAX   (emulock status for owners)"
 }
 

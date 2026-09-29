@@ -10,7 +10,8 @@
 #   deny  adb -s emulator-XXXX ...            unless this session owns the lock
 #   deny  device-targeting adb without -s     bare `adb shell`, `adb install`, ...
 #   deny  emulator @AVD launches              without the -port of a lock we own
-#   deny  pool boots with a window or -gpu    the emulator deletes the shared golden snapshot
+#   deny  pool boots whose window/-gpu flags do not match the snapshot (golden:
+#         headless, golden-window: windowed) — the emulator deletes the shared snapshot
 #   deny  gradlew install*/uninstall*/connected*  unless ANDROID_SERIAL names a lock we own
 #   deny  direct writes to the lock store     only `emulock` may manage it
 #   allow everything else — by staying silent (exit 0, no output), which defers
@@ -356,8 +357,14 @@ while IFS= read -r boot; do
   [[ -z "$boot_avd" ]] && boot_avd="$(printf '%s\n' "$boot" | grep -oE -- '-avd[[:space:]]+[A-Za-z0-9_.-]+' | awk '{print $2}' | head -n1)"
   is_pool_avd "$boot_avd" || continue
   has_flag "$boot" '--?(read-only|snapshot)' || continue
-  if ! has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
-    deny "Pool instances are headless only. '$boot_avd' boots from a snapshot saved headless with the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emulock claim --pool verbatim. If someone must see or type on the device, release the pool claim and claim a named AVD instead, which boots with a window: emulock claim --avd <name>."
+  boot_snapshot="$(printf '%s\n' "$boot" | grep -oE -- '-snapshot[[:space:]=]+[A-Za-z0-9_.-]+' | head -n1 | sed -E 's/^-snapshot[[:space:]=]+//')"
+  if [[ "$boot_snapshot" == "golden-window" ]]; then
+    # Saved from a windowed boot: a headless one, or any -gpu, cannot load it.
+    if has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
+      deny "'golden-window' was saved from a boot WITH a window and the default GPU; adding -no-window or -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool --window for everyone until a rebake. Run the boot command from emulock claim --pool --window verbatim, or claim a headless one: emulock claim --pool."
+    fi
+  elif ! has_flag "$boot" '--?no-window' || has_flag "$boot" '--?gpu'; then
+    deny "This pool snapshot is headless: '$boot_avd' boots from a snapshot saved with -no-window and the default GPU; dropping -no-window or adding -gpu makes the emulator delete that shared snapshot and exit, which breaks claim --pool for every agent until a rebake. Run the boot command from emulock claim --pool verbatim. For a device someone can watch, release this claim and use emulock claim --pool --window (needs emulock pool bake --window once), or a named AVD: emulock claim --avd <name>."
   fi
 done <<<"$boots"
 

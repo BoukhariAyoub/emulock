@@ -24,14 +24,14 @@
 # is blocked. `emulock init` wires it for you, once, after asking.
 #
 # Usage:
-#   emulock claim --pool [--additional] [--note TEXT]   a disposable pool instance
+#   emulock claim --pool [--window] [--additional] [--note TEXT]   a disposable pool instance
 #   emulock claim [--avd NAME] [--require-booted] [--additional] [--note TEXT]
 #   emulock reclaim [--note TEXT]
 #   emulock release <serial> [--kill] [--force]
 #   emulock heartbeat <serial>
 #   emulock status
 #   emulock reap
-#   emulock pool status | bake [--apk PATH] | rebake    build the pool's golden snapshot
+#   emulock pool status | bake [--window] [--apk PATH] | rebake    build the pool's golden snapshots
 #   emulock doctor                                      is emulock installed and enforced?
 #   emulock doctor <serial> [VARIANT] [--fix] [--json]  is this device ready to test on?
 #   emulock evidence start|shot|note|stop|render ...    record proof of an on-device test
@@ -60,6 +60,13 @@
 # second owner: release and reap shut it down, and every claim boots fresh
 # (seconds, from the snapshot). At most `pool.max` pool locks at once.
 #
+# Headless by default. A snapshot only loads under the display setup it was
+# saved with, so a device someone can watch needs its own snapshot:
+# `emulock pool bake --window` saves `golden-window` from a windowed boot, and
+# `claim --pool --window` boots from it with a window. Each snapshot refuses
+# the other mode (the emulator deletes a snapshot it cannot load; the guard
+# refuses the mismatched boot, and both are read-only on disk).
+#
 # Staleness (auto-reclaimed by claim/reap) is lease-based, not a blind TTL:
 #   - device absent from `adb devices` and no activity for 10 min (boot grace)
 #   - no activity for EMULATOR_LOCK_IDLE_TTL seconds (default 14400 = 4 h),
@@ -84,7 +91,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 BOOT_GRACE=600
@@ -100,6 +107,7 @@ SDK="$(ANDROID_HOME="${ANDROID_HOME:-}" ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-}"
 EMU_BIN="$SDK/emulator/emulator"
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 POOL_SNAPSHOT="golden"
+POOL_SNAPSHOT_WINDOW="golden-window"
 DRY_RUN=0
 
 die() { echo "emulock: $*" >&2; exit 1; }
@@ -336,7 +344,7 @@ reap_stale() { # reap_stale [verbose]
   return 0
 }
 
-write_meta() { # write_meta <serial> <avd> <port> <state> <note> [pool: 1]
+write_meta() { # write_meta <serial> <avd> <port> <state> <note> [pool: 1] [snapshot]
   cat > "$LOCK_ROOT/$1/meta" <<EOF
 SERIAL=$1
 AVD=$2
@@ -347,6 +355,7 @@ OWNER_WORKTREE=$(owner_worktree)
 OWNER_BRANCH=$(owner_branch)
 NOTE=$5
 POOL=${6:-0}
+POOL_SNAPSHOT=${7:-}
 CREATED_AT=$(now)
 EOF
   touch "$LOCK_ROOT/$1/last_used"
@@ -361,7 +370,12 @@ pool_lock_count() {
   echo "$n"
 }
 
-pool_snapshot_ready() { [[ -d "$AVD_HOME/$POOL_AVD.avd/snapshots/$POOL_SNAPSHOT" ]]; }
+pool_snapshot_ready() { [[ -d "$AVD_HOME/$POOL_AVD.avd/snapshots/${1:-$POOL_SNAPSHOT}" ]]; }
+pool_snapshot_of() { # the snapshot a pool lock was booted from (older locks: golden)
+  local snap
+  snap="$(meta_get "$1" POOL_SNAPSHOT)"
+  echo "${snap:-$POOL_SNAPSHOT}"
+}
 
 try_lock() { # atomic; 0 = we got it
   mkdir "$LOCK_ROOT/$1" 2>/dev/null
@@ -383,14 +397,19 @@ boot_command() { # boot_command <avd> <port>
   echo "$EMU_BIN @$avd $flags"
 }
 
-pool_boot_command() { # pool_boot_command <port>
+pool_boot_command() { # pool_boot_command <port> [window: 0|1]
   # -force-snapshot-load: a missing or broken snapshot must fail loudly, never
   # cold-boot a blank device that merely looks like a pool instance.
-  # -no-window and no -gpu: golden only loads under the renderer it was baked
-  # with. Any other and the emulator deletes it (the guard hook denies that).
-  # The API-36 GPU workaround is left out for the same reason: the pool image
-  # has to be one that boots without it.
-  echo "$EMU_BIN @$POOL_AVD -port $1 -no-boot-anim -read-only -snapshot $POOL_SNAPSHOT -force-snapshot-load -no-snapshot-save -no-window"
+  # Never a -gpu flag, and the window setting of the snapshot's own bake: a
+  # snapshot only loads under the renderer and features it was saved with. Any
+  # other and the emulator deletes it (the guard hook denies that). The API-36
+  # GPU workaround is left out for the same reason: the pool image has to be
+  # one that boots without it.
+  if [[ "${2:-0}" == 1 ]]; then
+    echo "$EMU_BIN @$POOL_AVD -port $1 -no-boot-anim -read-only -snapshot $POOL_SNAPSHOT_WINDOW -force-snapshot-load -no-snapshot-save"
+  else
+    echo "$EMU_BIN @$POOL_AVD -port $1 -no-boot-anim -read-only -snapshot $POOL_SNAPSHOT -force-snapshot-load -no-snapshot-save -no-window"
+  fi
 }
 
 avds_in_use() { # AVDs held by locks or running emulators
@@ -450,13 +469,21 @@ next_free_hint() {
 # on restart, so an instance someone used carries their APK, login and state
 # until it is shut down — reusing it would break "every instance starts from
 # golden". Releasing (and reaping) a pool instance shuts it down instead.
-claim_pool() { # claim_pool <note> <additional: 0|1>
-  local note="$1" additional="${2:-0}" our_serial="" port candidate all_serials in_use serial
+claim_pool() { # claim_pool <note> <additional: 0|1> <window: 0|1>
+  local note="$1" additional="${2:-0}" window="${3:-0}" our_serial="" port candidate all_serials in_use serial
+  local snapshot="$POOL_SNAPSHOT" mode="headless"
+  if [[ "$window" == 1 ]]; then snapshot="$POOL_SNAPSHOT_WINDOW"; mode="with a window"; fi
   (( additional )) || our_serial="$(find_our_lock)"
+  # A held instance of the other mode is not what was asked for, and cannot be
+  # turned into it: the display is fixed at boot.
+  if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial" \
+    && [[ "$(pool_snapshot_of "$our_serial")" != "$snapshot" ]] && adb_all_serials | grep -qx "$our_serial"; then
+    die "claim --pool: you hold $our_serial, booted from '$(pool_snapshot_of "$our_serial")' — release it first (emulock release $our_serial), or keep it and add this one with --additional"
+  fi
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial"; then
     if adb_booted_serials | grep -qx "$our_serial"; then
       touch "$LOCK_ROOT/$our_serial/last_used"
-      echo "claimed: $our_serial (already held, pool instance of $POOL_AVD)"
+      echo "claimed: $our_serial (already held, pool instance of $POOL_AVD from '$(pool_snapshot_of "$our_serial")')"
       print_pool_hint "$our_serial"
       return 0
     fi
@@ -477,7 +504,10 @@ claim_pool() { # claim_pool <note> <additional: 0|1>
   reap_stale
 
   # Always a fresh boot from the snapshot (seconds), within the cap.
-  pool_snapshot_ready || die "claim --pool: no '$POOL_SNAPSHOT' snapshot on AVD $POOL_AVD — bake it first: emulock pool bake"
+  if ! pool_snapshot_ready "$snapshot"; then
+    [[ "$window" == 1 ]] && die "claim --pool --window: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first (a window opens for a few minutes): emulock pool bake --window"
+    die "claim --pool: no '$snapshot' snapshot on AVD $POOL_AVD — bake it first: emulock pool bake"
+  fi
   in_use="$(pool_lock_count)"
   (( in_use < POOL_MAX )) || die "claim --pool: the pool is full ($in_use/$POOL_MAX). $(next_free_hint)"
   all_serials="$(adb_all_serials)"
@@ -492,8 +522,8 @@ claim_pool() { # claim_pool <note> <additional: 0|1>
   serial="emulator-$port"
 
   if [[ "$DRY_RUN" == 1 ]]; then
-    echo "[dry-run] would claim: $serial (boot a pool instance of $POOL_AVD)"
-    echo "[dry-run] boot command: $(pool_boot_command "$port")"
+    echo "[dry-run] would claim: $serial (boot a pool instance of $POOL_AVD, $mode)"
+    echo "[dry-run] boot command: $(pool_boot_command "$port" "$window")"
     return 0
   fi
   # Re-count now that the port is ours: a concurrent claim may have filled the pool.
@@ -501,11 +531,11 @@ claim_pool() { # claim_pool <note> <additional: 0|1>
     rm -rf "$LOCK_ROOT/$serial"
     die "claim --pool: the pool filled up while claiming ($POOL_MAX/$POOL_MAX) — retry after a release"
   fi
-  write_meta "$serial" "$POOL_AVD" "$port" "booting" "$note" 1
-  echo "claimed: $serial (boot needed, pool instance of $POOL_AVD)"
-  echo "boot command (run as long-lived background shell; loads the '$POOL_SNAPSHOT' snapshot, headless):"
-  echo "  $(pool_boot_command "$port")"
-  echo "copy it verbatim: changing the window or GPU flags deletes the shared '$POOL_SNAPSHOT' snapshot for every agent"
+  write_meta "$serial" "$POOL_AVD" "$port" "booting" "$note" 1 "$snapshot"
+  echo "claimed: $serial (boot needed, pool instance of $POOL_AVD, $mode)"
+  echo "boot command (run as long-lived background shell; loads the '$snapshot' snapshot, $mode):"
+  echo "  $(pool_boot_command "$port" "$window")"
+  echo "copy it verbatim: changing the window or GPU flags deletes the shared '$snapshot' snapshot for every agent"
   echo "then wait for boot:"
   echo "  adb -s $serial wait-for-device"
   print_pool_hint "$serial"
@@ -513,10 +543,11 @@ claim_pool() { # claim_pool <note> <additional: 0|1>
 
 cmd_claim() {
   local want_avd="" require_booted=0 note="" serial avd port used_avds candidate
-  local our_serial our_avd released_avd="" additional=0 pool=0
+  local our_serial our_avd released_avd="" additional=0 pool=0 window=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --pool) pool=1; shift ;;
+    --window) window=1; shift ;;
     --avd) want_avd="$2"; shift 2 ;;
     --require-booted) require_booted=1; shift ;;
     --additional) additional=1; shift ;;
@@ -529,9 +560,10 @@ cmd_claim() {
 
   if (( pool )); then
     [[ -z "$want_avd" ]] || die "claim: --pool and --avd are exclusive (the pool always uses $POOL_AVD)"
-    claim_pool "$note" "$additional"
+    claim_pool "$note" "$additional" "$window"
     return
   fi
+  (( window )) && die "claim: --window is for pool instances (claim --pool --window); a named AVD boots with a window already"
 
   # AVD name is identity. If this owner already reserved one, keep it —
   # even when the qemu process died and the old serial/port is gone.
@@ -541,7 +573,9 @@ cmd_claim() {
   # A held pool instance stays a pool claim: reviving it through the AVD path
   # below would boot the pool AVD writable and let the next instance inherit it.
   if [[ -n "$our_serial" ]] && is_pool_lock "$our_serial"; then
-    claim_pool "$note" 0
+    local held_window=0
+    [[ "$(pool_snapshot_of "$our_serial")" == "$POOL_SNAPSHOT_WINDOW" ]] && held_window=1
+    claim_pool "$note" 0 "$held_window"
     return
   fi
   if [[ -n "$our_serial" ]]; then
@@ -676,7 +710,11 @@ cmd_reclaim() {
   [[ -n "$our_serial" ]] || die "reclaim: this session has no prior claim. Use: emulock claim [--pool | --avd NAME]"
   if is_pool_lock "$our_serial"; then
     echo "reclaiming a pool instance (previous serial $our_serial; any instance will do)"
-    cmd_claim --pool --note "$note"
+    if [[ "$(pool_snapshot_of "$our_serial")" == "$POOL_SNAPSHOT_WINDOW" ]]; then
+      cmd_claim --pool --window --note "$note"
+    else
+      cmd_claim --pool --note "$note"
+    fi
     return
   fi
   avd="$(meta_get "$our_serial" AVD)"
@@ -757,7 +795,10 @@ cmd_status() {
     elif adb_all_serials | grep -qx "$serial"; then state="offline"
     else state="absent"; fi
     is_stale "$serial" && state="$state (STALE)"
-    is_pool_lock "$serial" && avd="${avd:-?} (pool)"
+    if is_pool_lock "$serial"; then
+      avd="${avd:-?} (pool)"
+      [[ "$(pool_snapshot_of "$serial")" == "$POOL_SNAPSHOT_WINDOW" ]] && avd="${avd%)}, window)"
+    fi
     printf '%-16s %-24s %-30s %-10s %-8s %s\n' "$serial" "${avd:-?}" "${branch:-?}" "${oid:0:8}" "$h" "$state"
   done
   (( found )) || echo "(no locks)"
@@ -770,9 +811,10 @@ cmd_status() {
     printf '%-16s %-24s %-30s %-10s %-8s %s\n' "$serial" "$avd" "-" "-" "-" "$state"
   done
   if [[ -d "$AVD_HOME/$POOL_AVD.avd" ]]; then
-    local snap="missing — emulock pool bake"
+    local snap="missing — emulock pool bake" window=""
     pool_snapshot_ready && snap="ready"
-    echo "agent pool: $(pool_lock_count)/$POOL_MAX claimed · AVD $POOL_AVD · snapshot '$POOL_SNAPSHOT' $snap"
+    pool_snapshot_ready "$POOL_SNAPSHOT_WINDOW" && window=" · '$POOL_SNAPSHOT_WINDOW' ready (claim --pool --window)"
+    echo "agent pool: $(pool_lock_count)/$POOL_MAX claimed · AVD $POOL_AVD · snapshot '$POOL_SNAPSHOT' $snap$window"
   fi
 }
 

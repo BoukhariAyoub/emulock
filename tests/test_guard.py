@@ -70,8 +70,8 @@ class GuardTest(unittest.TestCase):
 
     def test_a_pool_boot_with_a_window_is_denied(self):
         self.assertEqual("deny", self.decide(POOL_BOOT.replace(" -no-window", "")))
-        self.assertIn("headless only", self.last_reason)
-        self.assertIn("emulock claim --avd", self.last_reason)
+        self.assertIn("snapshot is headless", self.last_reason)
+        self.assertIn("claim --pool --window", self.last_reason)
 
     def test_a_pool_boot_with_a_gpu_flag_is_denied(self):
         for gpu in ("-gpu host", "-gpu swiftshader_indirect", "--gpu host", "-gpu=host"):
@@ -117,6 +117,17 @@ class GuardTest(unittest.TestCase):
         for command in cases:
             with self.subTest(command=command):
                 self.assertEqual("allow", self.decide(command))
+
+    def test_the_window_snapshot_needs_a_window_and_no_gpu_flag(self):
+        window_boot = POOL_BOOT.replace("-snapshot golden", "-snapshot golden-window").replace(" -no-window", "")
+        self.assertEqual("allow", self.decide(window_boot))
+        self.assertEqual("deny", self.decide(window_boot + " -no-window"))
+        self.assertIn("WITH a window", self.last_reason)
+        self.assertEqual("deny", self.decide(window_boot + " -gpu host"))
+        self.assertEqual("deny", self.decide(window_boot.replace("-snapshot golden-window", "-snapshot=golden-window")
+                                             + " -no-window"))
+        # ...and a windowed boot of the headless snapshot is still refused.
+        self.assertEqual("deny", self.decide(POOL_BOOT.replace(" -no-window", "")))
 
     def test_a_pool_avd_is_recognised_by_its_golden_record_or_the_environment(self):
         legacy = self.avd_home / "legacy_pool.avd"

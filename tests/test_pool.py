@@ -244,6 +244,48 @@ class PoolTest(unittest.TestCase):
         out = self.lock("--dry-run", "claim", "--pool", EMULOCK_POOL_AVD="other_pool")
         self.assertIn("no 'golden' snapshot on AVD other_pool", out.stderr)
 
+    # --- the windowed snapshot ------------------------------------------------------
+
+    def test_a_window_claim_needs_golden_window(self):
+        out = self.lock("claim", "--pool", "--window")
+        self.assertNotEqual(0, out.returncode)
+        self.assertIn("emulock pool bake --window", out.stderr)
+        self.assertFalse(any(self.locks.iterdir()))
+
+    def test_a_window_claim_boots_golden_window_with_a_window(self):
+        (self.avd_home / f"{POOL}.avd" / "snapshots" / "golden-window").mkdir()
+        out = self.lock("claim", "--pool", "--window")
+        self.assertEqual(0, out.returncode, out.stderr)
+        boot = next(line for line in out.stdout.splitlines() if "-read-only" in line)
+        self.assertIn("-snapshot golden-window", boot)
+        self.assertNotIn("-no-window", boot)
+        self.assertNotIn("-gpu", boot)
+        self.assertEqual("golden-window", self.meta("emulator-5554")["POOL_SNAPSHOT"])
+        self.assertIn("(pool, window)", self.lock("status").stdout)
+
+    def test_reclaim_keeps_the_window_mode(self):
+        (self.avd_home / f"{POOL}.avd" / "snapshots" / "golden-window").mkdir()
+        self.lock("claim", "--pool", "--window")
+        out = self.lock("reclaim")  # the instance is gone (no devices)
+        self.assertIn("-snapshot golden-window", out.stdout)
+
+    def test_a_headless_claim_records_golden(self):
+        self.lock("claim", "--pool")
+        self.assertEqual("golden", self.meta("emulator-5554")["POOL_SNAPSHOT"])
+
+    def test_a_held_headless_instance_is_not_passed_off_as_a_windowed_one(self):
+        (self.avd_home / f"{POOL}.avd" / "snapshots" / "golden-window").mkdir()
+        self.lock("claim", "--pool")
+        out = self.lock("claim", "--pool", "--window", devices=f"emulator-5554=device={POOL}")
+        self.assertNotEqual(0, out.returncode)
+        self.assertIn("you hold emulator-5554, booted from 'golden'", out.stderr)
+        both = self.lock("claim", "--pool", "--window", "--additional", devices=f"emulator-5554=device={POOL}")
+        self.assertIn("-snapshot golden-window", both.stdout)
+
+    def test_window_without_pool_is_refused(self):
+        out = self.lock("claim", "--window")
+        self.assertIn("--window is for pool instances", out.stderr)
+
     def test_dry_run_claims_nothing(self):
         out = self.lock("claim", "--pool", "--dry-run")
         self.assertIn("[dry-run] boot command:", out.stdout)

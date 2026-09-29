@@ -177,6 +177,7 @@ emulock doctor          # is emulock installed, and is enforcement actually wire
 
 ```bash
 emulock claim --pool               # a disposable, ready-made device (see "The pool")
+emulock claim --pool --window      # the same, in a window you can watch
 emulock claim                      # or reserve an ordinary AVD
 emulock claim --avd medium_phone   # a specific one
 emulock claim --note "checkout flake repro"
@@ -217,11 +218,19 @@ on, no lock screen, a hardware keyboard so the IME never covers the screen — t
 installs your app and runs your project's setup hook if you have one (below). It only
 saves the snapshot if `emulock doctor` agrees the device is clean.
 
-The pool is **headless only**. A snapshot loads only under the display setup it was
-saved with, and a boot that cannot load it makes the emulator delete it — for every
-agent. The guard refuses a pool boot without `-no-window` or with a `-gpu` flag, and
-`golden` is read-only on disk between bakes. For a device someone can watch or type
-on, claim an ordinary AVD.
+**Headless by default, watchable on request.** A snapshot loads only under the display
+setup it was saved with — the renderer *and* the window — and a boot that cannot load
+it makes the emulator delete it, for every agent. So a device you can watch has its
+own snapshot:
+
+```bash
+emulock pool bake --window         # once: saves golden-window from a windowed boot
+emulock claim --pool --window      # a disposable pool instance, in a window
+```
+
+The guard holds each boot to its snapshot — `golden` needs `-no-window`,
+`golden-window` must not have it, and neither takes a `-gpu` flag — and both are
+read-only on disk between bakes. `rebake` refreshes `golden-window` too once it exists.
 
 ### Proof for reviewers
 

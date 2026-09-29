@@ -27,8 +27,12 @@ process, then `adb -s <serial> wait-for-device`. Never drop `-no-window` or add 
 `-gpu` flag: the snapshot only loads headless, and a boot that cannot load it makes
 the emulator delete it for everyone (the guard refuses that boot).
 
+When the user wants to **watch or touch** the device, claim `emulock claim --pool --window`
+instead: the same disposable device, booted in a window from its own `golden-window`
+snapshot (if it says the snapshot is missing, tell the user: baking it is theirs to run,
+`emulock pool bake --window`). Its boot command has no `-no-window`; run it verbatim too.
 `emulock claim` (no `--pool`) reserves an ordinary AVD instead, and `--avd <name>` a
-specific one — use those when the user asks for a device they can watch or touch.
+specific one.
 `--additional` gets a second device for a two-device test. The `--note` records your
 intent so a human can see why the device is busy; pass it.
 

@@ -221,6 +221,28 @@ class CliTest(unittest.TestCase):
         self.assertIn("verify (lock boot tutorial)", out.stdout)
         self.assertFalse((self.avd_home / "test_pool.avd" / "emulock-pool").exists())  # dry run: no marker
 
+    def test_pool_bake_window_dry_run_names_the_window_snapshot(self):
+        self.config("pool.avd = test_pool\n")
+        (self.avd_home / "test_pool.avd").mkdir()
+        out = self.run_cli("pool", "bake", "--window", "--dry-run")
+        self.assertEqual(0, out.returncode, out.stderr)
+        self.assertIn("with a window", out.stdout)
+        self.assertIn("save 'golden-window'", out.stdout)
+
+    def test_pool_status_lists_both_snapshots(self):
+        avd = self.avd_home / "emulock_pool.avd"
+        (avd / "snapshots" / "golden").mkdir(parents=True)
+        (avd / "config.ini").write_text("image.sysdir.1=system-images/android-34/google_apis/arm64-v8a/\n")
+        out = self.run_cli("pool", "status").stdout
+        self.assertIn("'golden-window': not baked", out)
+        (avd / "snapshots" / "golden-window").mkdir()
+        (avd / "golden-window.json").write_text('{"baked_at": "2026-09-29T00:00:00Z", "commit": "abc1234"}')
+        out = self.run_cli("pool", "status").stdout
+        self.assertIn("claim --pool --window", out)
+        self.assertIn("baked from abc1234", out)
+        self.config("pool.apk = app.apk\npool.build = true\n")
+        self.assertIn("then golden-window with a window", self.run_cli("pool", "rebake", "--dry-run").stdout)
+
     def test_pool_bake_needs_the_configured_apk(self):
         self.config("pool.apk = app/build/app.apk\npool.build = ./gradlew assembleDebug\n")
         out = self.run_cli("pool", "bake")
@@ -239,10 +261,10 @@ class CliTest(unittest.TestCase):
         (self.avd_home / "emulock_pool.avd" / "config.ini").write_text(
             "image.sysdir.1=system-images/android-34/google_apis/arm64-v8a/\n")
         out = self.run_cli("pool", "status")
-        self.assertIn("is writable", out.stdout)
+        self.assertIn("writable:", out.stdout)
         os.chmod(snap, 0o555)
         try:
-            self.assertNotIn("is writable", self.run_cli("pool", "status").stdout)
+            self.assertNotIn("writable:", self.run_cli("pool", "status").stdout)
         finally:
             os.chmod(snap, 0o755)
 
