@@ -242,7 +242,8 @@ emuriad pool status
 ```
 
 `bake` fixes the settings that waste agent time on a fresh device — Private DNS off
-(it breaks name resolution on the emulator's network), animations off, screen always
+(it breaks name resolution on the emulator's network), animations off (kept on for the
+`--window` snapshot, which a person watches: a frozen spinner reads as a hang), screen always
 on, no lock screen, a hardware keyboard so the IME never covers the screen — then
 installs your app and runs your project's setup hook if you have one (below). It only
 saves the snapshot if `emuriad doctor` agrees the device is clean.

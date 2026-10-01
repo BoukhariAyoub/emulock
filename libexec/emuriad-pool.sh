@@ -7,8 +7,9 @@
 # snapshot. Everything an agent would otherwise fix by hand on a fresh device is
 # already done in it:
 #
-#   device  locale checked, Private DNS off, animations off, screen always on,
-#           no lock screen, hardware keyboard (the IME never covers the screen)
+#   device  locale checked, Private DNS off, animations off (on for golden-window,
+#           which a person watches), screen always on, no lock screen, hardware
+#           keyboard (the IME never covers the screen)
 #   app     optional: pool.apk installed, then the project's own setup hook
 #           (.emuriad/pool-setup.sh) — sign-out state, first-run flags, permissions
 #
@@ -221,9 +222,13 @@ setup_device() {
     die "the image boots in '$locale', not $LOCALE (set locale = any in $CONF_DIR/config to accept it)"
   fi
   dev_sh settings put global private_dns_mode off
-  dev_sh settings put global window_animation_scale 0
-  dev_sh settings put global transition_animation_scale 0
-  dev_sh settings put global animator_duration_scale 0
+  # Agents get no animations: steadier screenshots, no waiting on transitions. A windowed
+  # phone is for a person, and with animations off every spinner freezes and reads as a hang.
+  local scale=0
+  (( WINDOW )) && scale=1
+  dev_sh settings put global window_animation_scale "$scale"
+  dev_sh settings put global transition_animation_scale "$scale"
+  dev_sh settings put global animator_duration_scale "$scale"
   dev_sh svc power stayon true
   dev_sh settings put system screen_off_timeout 2147483647
   dev_sh locksettings set-disabled true >/dev/null || true   # already off on a fresh image

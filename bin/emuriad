@@ -96,7 +96,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 LOCK_ROOT="${EMULATOR_LOCK_DIR:-$HOME/.emulator-locks}"
 IDLE_TTL="${EMULATOR_LOCK_IDLE_TTL:-14400}"
 BOOT_GRACE=600
